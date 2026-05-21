@@ -21,7 +21,7 @@ pnpm-debug.log*
 yarn-debug.log*
 yarn-error.log*
 
-# Environment files
+# Secrets — ne jamais versionner
 .env
 .env.*
 !.env.example
@@ -29,31 +29,17 @@ yarn-error.log*
 .env.test
 .env.production
 
-# Python
+# Python (régénérable : pip install -r requirements.txt)
 __pycache__/
 .ipynb_checkpoints/
 .venv/
 **/.venv/
 *.pyc
 
-# Runtime / sessions
+# Runtime / sessions entretien
 .runtime/
 **/emotion-sessions/
 **/last_frame.jpg
 **/preview.jpg
-
-# Données d'entraînement / tests locaux (très volumineux)
-emotiondetection/binary_data/
-
-# Fichiers candidats / transcripts locaux
-chatbot/transcripts/*.pdf
-chatbot/resumes/
-
-# Modèles lourds (téléchargés au setup — voir README_FINAL.md)
-face_landmarker.task
-emotiondetection/models/binary_emotion_model.h5
-emotiondetection/models/yolov8n.pt
-**/*.pt
-**/*.h5
 
 .vscode/

@@ -176,13 +176,16 @@ Le backend attend :
 - `chatbot\.venv\Scripts\python.exe`
 - `emotiondetection\.venv\Scripts\python.exe`
 
-### 5.5 Fichiers modèles
+### 5.5 Fichiers modèles et dataset (inclus dans le dépôt Git)
 
-| Fichier | Emplacement |
-|---------|-------------|
+| Fichier / dossier | Emplacement |
+|-------------------|-------------|
 | `binary_emotion_model.h5` | `emotiondetection/models/` |
-| `face_landmarker.task` | racine `pfe-main/` ou variable `FACE_LANDMARKER_PATH` |
-| YOLO `yolov8n.pt` | téléchargé automatiquement au premier frame |
+| `yolov8n.pt` | `emotiondetection/models/` |
+| `face_landmarker.task` | racine du projet |
+| `binary_data/` | `emotiondetection/binary_data/` (dataset entraînement/test) |
+
+Après clone, il reste à installer les dépendances Node/Python (sections 5.2–5.4) — pas besoin de retélécharger les modèles.
 
 ---
 
@@ -397,7 +400,7 @@ python hr_interview.py
 - **Preview annotée** : le backend renvoie `previewBase64` (même rendu que le moniteur Python).
 - **Production** : désactiver `synchronize: true`, utiliser migrations TypeORM, changer `JWT_SECRET`, HTTPS.
 
-Fichiers à ne **pas** committer (déjà dans `.gitignore`) : `.env`, `node_modules/`, `.venv/`, `.runtime/`.
+Fichiers à ne **pas** committer (déjà dans `.gitignore`) : `.env`, `node_modules/`, `.venv/`, `.runtime/`. Les **modèles et le dataset** sont versionnés dans ce dépôt privé.
 
 ---
 

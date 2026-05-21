@@ -1,0 +1,54 @@
+{
+  "candidate_name": "ESRA MARZOUKI",
+  "job_role_applied": "frontend developer",
+  "contact": {
+    "email": "esra.marzouki@iu-study.org",
+    "phone": "+216 27659672",
+    "location": "Tunisia"
+  },
+  "professional_summary": "Applied AI and Computer Engineering student focused on Data Science and BI, with experience in Python, SQL, and data analysis on real-world datasets. Strong interest in analytics, reporting, and data-driven decision-making.",
+  "education": [
+    {
+      "degree": "Bachelor of science: Applied Artificial Intelligence",
+      "institution": "IU INTERNATIONAL UNIVERSITY OF APPLIED SCIENCES",
+      "graduation_year": "2027-2023"
+    }
+  ],
+  "work_experience": [
+    {
+      "job_title": "DATA Science Intern",
+      "company": "OPTIMAL SOLUTION",
+      "duration": "JULY-AUGUST 2024",
+      "responsibilities": [
+        "Designed and implemented a real-time AI-based solution to detect occupancy and optimize energy usage, contributing to sustainable infrastructure.",
+        "Integrated IoT sensors and edge computing to collect and process environmental data, enabling automated control of lighting and HVAC systems.",
+        "Collaborated with a multidisciplinary team to deploy and test the system in real-world school environments, achieving measurable energy savings.",
+        "Performed Exploratory Data Analysis (EDA) to uncover patterns, trends, and anomalies, supporting decision-making and process optimization."
+      ]
+    }
+  ],
+  "skills": [
+    "Python",
+    "SQL",
+    "Excel",
+    "PowerBI",
+    "DuckDB",
+    "scikit-learn",
+    "PyTorch",
+    "OpenCV",
+    "English",
+    "French",
+    "Arabic",
+    "Turkish"
+  ],
+  "interview_highlights": {
+    "job_role_interviewed_for": "frontend developer",
+    "key_answers": [
+      "i am a computer engineering student, i am currently doing my end of studies internship, i have worked on couple of dev projects, front and back end",
+      "i worked on a recruting website where the candidates provide their cv and the job description he's appling for and the bot tells them wether they are fit for the position or not and if there are any skills that he needs to develop, and for the dev part i worked with react",
+      "yes i have experience with react"
+    ],
+    "strengths_observed": "",
+    "recommendation": ""
+  }
+}
