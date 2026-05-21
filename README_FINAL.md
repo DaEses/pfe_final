@@ -1,39 +1,70 @@
 # README Final — Plateforme PFE Job Finder
 
-Guide unique pour cloner le projet depuis GitHub, installer les dépendances, créer la base de données et lancer l'application complète (HR + candidat + IA).
+Guide complet pour **cloner**, **installer PostgreSQL**, **configurer** et **lancer** le projet sur un autre PC (Windows).  
+Dépôt GitHub : **https://github.com/DaEses/pfe_final**
+
+Les **modèles IA** et le **dataset** (`binary_data`, `.h5`, `.pt`, `face_landmarker.task`) sont déjà dans le repo — pas besoin de les retélécharger après le clone.
 
 ---
 
 ## Sommaire
 
+0. [**Guide rapide — nouveau PC (checklist)**](#0-guide-rapide--nouveau-pc-checklist)
 1. [Vue d'ensemble](#1-vue-densemble)
 2. [Architecture](#2-architecture)
 3. [Structure du dépôt](#3-structure-du-dépôt)
 4. [Prérequis](#4-prérequis)
-5. [Installation pas à pas](#5-installation-pas-à-pas)
+5. [Installation détaillée](#5-installation-détaillée)
 6. [Base de données PostgreSQL](#6-base-de-données-postgresql)
 7. [Variables d'environnement](#7-variables-denvironnement)
 8. [Démarrage des services](#8-démarrage-des-services)
-9. [Flux métier](#9-flux-métier)
-10. [API principale](#10-api-principale)
-11. [Modules Python (IA)](#11-modules-python-ia)
-12. [Optimisations & bonnes pratiques](#12-optimisations--bonnes-pratiques)
+9. [Vérification que tout fonctionne](#9-vérification-que-tout-fonctionne)
+10. [Flux métier](#10-flux-métier)
+11. [API principale](#11-api-principale)
+12. [Modules Python (IA)](#12-modules-python-ia)
 13. [Dépannage](#13-dépannage)
-14. [Comptes de test](#14-comptes-de-test)
+
+---
+
+## 0. Guide rapide — nouveau PC (checklist)
+
+Suivre les étapes **dans l'ordre**. Cocher au fur et à mesure.
+
+| # | Étape | Commande / action |
+|---|--------|-------------------|
+| 1 | Installer Node.js 18+, Python 3.10+, PostgreSQL 13+, Git | Voir [§4 Prérequis](#4-prérequis) |
+| 2 | Cloner le projet | `git clone https://github.com/DaEses/pfe_final.git` puis `cd pfe_final` |
+| 3 | Installer PostgreSQL et noter port / mot de passe | [§6 Base de données](#6-base-de-données-postgresql) |
+| 4 | Créer la base `job_finder` | `psql` + `CREATE DATABASE job_finder;` ou pgAdmin |
+| 5 | Configurer le backend `.env` | `copy .env.example .env` + adapter `DB_PORT` / `DB_PASSWORD` |
+| 6 | Configurer le frontend `.env` | `copy .env.example .env` |
+| 7 | `npm install` backend + frontend | [§5.2–5.3](#52-backend-nestjs) |
+| 8 | Créer les 2 venv Python + `pip install` | [§5.4](#54-environnements-python-obligatoire) |
+| 9 | Vérifier modèles présents | `face_landmarker.task`, `binary_emotion_model.h5`, `yolov8n.pt` |
+| 10 | Démarrer PostgreSQL → backend → frontend | [§8](#8-démarrage-des-services) ou `.\start-all.ps1` |
+| 11 | Tester dans le navigateur | [§9](#9-vérification-que-tout-fonctionne) |
+
+**URLs une fois démarré**
+
+| Service | URL |
+|---------|-----|
+| Frontend | http://localhost:5173 |
+| API | http://localhost:3000/api |
+| PostgreSQL | `localhost` + port de votre `.env` (8080 ou 5432) |
 
 ---
 
 ## 1. Vue d'ensemble
 
-| Composant | Technologie | Rôle |
+| Composant | Technologie | Port |
 |-----------|-------------|------|
-| Frontend HR + Candidat | React 18 + Vite | Port **5173** |
-| Backend API | NestJS + TypeORM | Port **3000** (`/api`) |
-| Base de données | PostgreSQL | Port **8080** (config locale) ou **5432** |
-| Chatbot entretien | Python + Whisper | Questions/réponses vocales |
-| Détection émotion | Python + Keras + MediaPipe + YOLO | Gaze, émotions, téléphone |
+| Frontend HR + Candidat | React 18 + Vite | **5173** |
+| Backend API | NestJS + TypeORM | **3000** (`/api`) |
+| Base de données | PostgreSQL | **8080** ou **5432** |
+| Chatbot | Python + Whisper | via backend |
+| Emotion / gaze / phone | Python + Keras + MediaPipe + YOLO | via backend |
 
-**Pas de Docker** dans cette version : installation locale (Windows recommandé, PowerShell).
+Installation locale **sans Docker** (Windows + PowerShell recommandé).
 
 ---
 
@@ -41,102 +72,71 @@ Guide unique pour cloner le projet depuis GitHub, installer les dépendances, cr
 
 ```mermaid
 flowchart TB
-  subgraph client [Navigateur candidat / RH]
-    FE[React Vite :5173]
-  end
-
-  subgraph api [Backend NestJS :3000]
-    AUTH[Auth JWT HR + Job Seeker]
-    JOBS[Offres & candidatures]
-    INT[Entretiens & rapports]
-    BRIDGE[Sync HR applications ↔ job_applications]
-  end
-
-  subgraph db [PostgreSQL]
-    PG[(job_finder)]
-  end
-
-  subgraph python [Worker Python persistant]
-    EW[emotion_worker.py]
-    YOLO[YOLO téléphone]
-    GAZE[MediaPipe gaze]
-    EMO[Keras émotion]
-  end
-
-  subgraph py2 [Scripts ponctuels]
-    CB[chatbot api_runner Whisper]
-  end
-
-  FE -->|REST JSON + JWT| api
-  api --> PG
-  INT -->|frames base64| EW
-  EW --> YOLO
-  EW --> GAZE
-  EW --> EMO
-  INT -->|fin entretien| CB
+  FE[React :5173] -->|JWT REST| API[NestJS :3000]
+  API --> PG[(PostgreSQL job_finder)]
+  API --> EW[emotion_worker.py]
+  API --> CB[chatbot Whisper]
 ```
 
-### Flux entretien candidat (navigateur)
-
-1. RH approuve et planifie → statut `interview_scheduled` (sync côté candidat).
-2. Candidat ouvre `/job-seeker/interview/:jobPostingId` → caméra navigateur.
-3. Le frontend envoie des images (~toutes les 3 s) à `POST /api/interviews/candidate/:id/emotion-frame`.
-4. Le backend lance un **worker Python persistant** (`emotion_worker.py`) — même logique que `interview_monitor.py` (overlay, gaze, phone).
-5. À la fin : chatbot (réponses) + rapport HR (scores, émotions, alertes gaze/phone).
+**Entretien candidat** : caméra navigateur → frames vers l'API → worker Python (gaze, émotion, téléphone) → rapport HR.
 
 ---
 
 ## 3. Structure du dépôt
 
 ```
-pfe-main/
-├── README.md                 → lien vers ce fichier
-├── README_FINAL.md           → ce document
-├── start-all.ps1             → démarrage PostgreSQL + backend + frontend
-├── scripts/
-│   └── init-database.sql     → création base job_finder
+pfe_final/                    (racine après clone)
+├── README.md
+├── README_FINAL.md           ← ce guide
+├── start-all.ps1             ← lance PG + backend + frontend (Windows)
+├── stop-all.ps1
+├── scripts/init-database.sql
+├── face_landmarker.task      ← inclus dans Git
 ├── plateform/jobfinderportal-master/
-│   ├── job-finder-backend/   → API NestJS
-│   └── job-finder-frontend/  → UI React
-├── chatbot/                  → Whisper, entretien vocal
-│   ├── .venv/
-│   ├── api_runner.py
-│   └── requirements.txt
+│   ├── job-finder-backend/
+│   └── job-finder-frontend/
+├── chatbot/
 ├── emotiondetection/
-│   ├── .venv/
-│   ├── models/
-│   │   ├── emotion_worker.py      → worker API (persistant)
-│   │   ├── interview_monitor.py   → test standalone webcam
-│   │   └── binary_emotion_model.h5
-│   └── requirements.txt
-└── face_landmarker.task      → modèle MediaPipe (racine ou chemin env)
+│   ├── binary_data/          ← dataset inclus dans Git
+│   └── models/
+│       ├── binary_emotion_model.h5
+│       ├── yolov8n.pt
+│       └── emotion_worker.py
 ```
+
+**Non versionnés** (à recréer sur chaque PC) : `node_modules/`, `.venv/`, fichiers `.env`.
 
 ---
 
 ## 4. Prérequis
 
-| Outil | Version min. | Notes |
-|-------|--------------|-------|
-| **Node.js** | 18+ | Backend + frontend |
-| **npm** | 9+ | `npm install --legacy-peer-deps` côté backend si conflits |
-| **PostgreSQL** | 13+ | Port **8080** dans `.env.example` du backend |
-| **Python** | 3.10+ | venv dans `chatbot/` et `emotiondetection/` |
-| **Webcam + micro** | — | Entretien candidat + tests chatbot |
-| **Ollama** | optionnel | Uniquement `chatbot/hr_interview.py` interactif |
+Installer **avant** de lancer le projet :
 
-Espace disque : modèles Python (YOLO, Keras, landmarker) ~500 Mo–1 Go après premier lancement.
+| Outil | Version | Lien / notes |
+|-------|---------|--------------|
+| **Git** | récent | https://git-scm.com |
+| **Node.js** | 18 ou 20 LTS | https://nodejs.org |
+| **npm** | 9+ | inclus avec Node |
+| **Python** | 3.10 ou 3.11 | https://www.python.org — cocher *Add to PATH* |
+| **PostgreSQL** | 13+ (16/17/18 OK) | https://www.postgresql.org/download/windows/ |
+| **Webcam + micro** | — | Entretien candidat |
+
+Optionnel : **Ollama** uniquement pour tester `chatbot/hr_interview.py` en mode interactif.
+
+**Espace disque** : ~2–3 Go (clone + `node_modules` + venv Python).
 
 ---
 
-## 5. Installation pas à pas
+## 5. Installation détaillée
 
 ### 5.1 Cloner le dépôt
 
 ```powershell
-git clone <URL_DU_REPO_GITHUB>
-cd pfe-main
+git clone https://github.com/DaEses/pfe_final.git
+cd pfe_final
 ```
+
+> Si le dossier s'appelle autrement après clone, adapter les chemins (`cd` vers la racine qui contient `start-all.ps1`).
 
 ### 5.2 Backend (NestJS)
 
@@ -144,8 +144,14 @@ cd pfe-main
 cd plateform\jobfinderportal-master\job-finder-backend
 npm install --legacy-peer-deps
 copy .env.example .env
-# Éditer .env si mot de passe PostgreSQL différent
+notepad .env
 ```
+
+Dans `.env`, vérifier **obligatoirement** :
+
+- `DB_HOST`, `DB_PORT`, `DB_USERNAME`, `DB_PASSWORD`, `DB_NAME`
+- `JWT_SECRET` (valeur quelconque en local)
+- `NODE_ENV=development`
 
 ### 5.3 Frontend (React)
 
@@ -155,78 +161,145 @@ npm install
 copy .env.example .env
 ```
 
-### 5.4 Environnements Python (une fois)
+Le fichier `.env` doit contenir :
 
-```powershell
-cd <racine pfe-main>\chatbot
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-deactivate
-
-cd ..\emotiondetection
-python -m venv .venv
-.\.venv\Scripts\Activate.ps1
-pip install -r requirements.txt
-deactivate
+```env
+VITE_API_BASE_URL=http://localhost:3000/api
 ```
 
-Le backend attend :
+### 5.4 Environnements Python (obligatoire)
+
+Le backend appelle ces interpréteurs :
 
 - `chatbot\.venv\Scripts\python.exe`
 - `emotiondetection\.venv\Scripts\python.exe`
 
-### 5.5 Fichiers modèles et dataset (inclus dans le dépôt Git)
+**Chatbot**
 
-| Fichier / dossier | Emplacement |
-|-------------------|-------------|
-| `binary_emotion_model.h5` | `emotiondetection/models/` |
-| `yolov8n.pt` | `emotiondetection/models/` |
-| `face_landmarker.task` | racine du projet |
-| `binary_data/` | `emotiondetection/binary_data/` (dataset entraînement/test) |
+```powershell
+cd <racine-projet>\chatbot
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+deactivate
+```
 
-Après clone, il reste à installer les dépendances Node/Python (sections 5.2–5.4) — pas besoin de retélécharger les modèles.
+**Emotion detection**
+
+```powershell
+cd <racine-projet>\emotiondetection
+python -m venv .venv
+.\.venv\Scripts\Activate.ps1
+python -m pip install --upgrade pip
+pip install -r requirements.txt
+deactivate
+```
+
+> La première installation Python peut prendre **10–20 minutes** (TensorFlow, OpenCV, MediaPipe, etc.).
+
+### 5.5 Modèles et dataset (déjà dans Git)
+
+Vérifier après clone :
+
+```powershell
+cd <racine-projet>
+Test-Path face_landmarker.task
+Test-Path emotiondetection\models\binary_emotion_model.h5
+Test-Path emotiondetection\models\yolov8n.pt
+Test-Path emotiondetection\binary_data
+```
+
+Tous doivent retourner `True`. Sinon : `git pull` ou re-cloner.
 
 ---
 
 ## 6. Base de données PostgreSQL
 
-### Option A — psql
+### 6.1 Installer PostgreSQL (nouveau PC)
+
+1. Télécharger l'installateur Windows PostgreSQL.
+2. Pendant l'installation :
+   - Noter le **mot de passe** du super-utilisateur `postgres`.
+   - Port par défaut souvent **5432** (vous pouvez garder 5432 ou utiliser **8080** comme sur la machine de dev — l'important est d'aligner `DB_PORT` dans `.env`).
+3. Laisser cocher l'installation de **pgAdmin** (utile pour créer la base visuellement).
+
+### 6.2 Démarrer le service PostgreSQL
+
+**Services Windows**
+
+- `Win + R` → `services.msc` → service **postgresql-x64-…** → **Démarrer** → Démarrage automatique.
+
+**Ou PowerShell (admin)** :
 
 ```powershell
-# Se connecter (adapter -p 8080 ou 5432)
-psql -U postgres -p 8080 -h localhost
+Get-Service -Name *postgres* | Start-Service
+```
 
-# Puis exécuter :
+### 6.3 Créer la base `job_finder`
+
+#### Option A — Ligne de commande `psql`
+
+Remplacer `8080` par `5432` si c'est votre port PostgreSQL.
+
+```powershell
+# Connexion (mot de passe demandé)
+psql -U postgres -h localhost -p 8080
+
+# Dans psql :
 CREATE DATABASE job_finder;
+\l
 \q
 ```
 
-Ou utiliser le script fourni :
+Script fourni :
 
 ```powershell
-psql -U postgres -p 8080 -h localhost -f scripts\init-database.sql
+cd <racine-projet>
+psql -U postgres -h localhost -p 8080 -f scripts\init-database.sql
 ```
 
-### Option B — pgAdmin
+#### Option B — pgAdmin
 
-Créer une base nommée **`job_finder`**, encodage UTF8.
+1. Ouvrir pgAdmin → se connecter au serveur local.
+2. Clic droit **Databases** → **Create** → **Database**.
+3. Nom : **`job_finder`** → Save.
 
-### Tables
+### 6.4 Tables (automatique)
 
-En `NODE_ENV=development`, TypeORM **`synchronize: true`** crée/met à jour les tables au démarrage du backend. Aucun script de migration manuel n'est requis pour une installation fraîche.
+Avec `NODE_ENV=development`, TypeORM **`synchronize: true`** crée toutes les tables au **premier démarrage réussi** du backend.
 
-### Configuration type
+Vous n'avez **pas** de script SQL de tables à exécuter manuellement.
 
-| Paramètre | Valeur par défaut (`.env.example`) |
-|-----------|-------------------------------------|
-| Host | `localhost` |
-| Port | **`8080`** |
-| User | `postgres` |
-| Password | `123` |
-| Database | `job_finder` |
+### 6.5 Aligner le backend avec votre PostgreSQL
 
-Si PostgreSQL écoute sur **5432**, modifier `DB_PORT=5432` dans `job-finder-backend/.env`.
+Fichier : `plateform/jobfinderportal-master/job-finder-backend/.env`
+
+| Variable | Exemple machine dev | Exemple install standard |
+|----------|---------------------|---------------------------|
+| `DB_HOST` | `localhost` | `localhost` |
+| `DB_PORT` | `8080` | `5432` |
+| `DB_USERNAME` | `postgres` | `postgres` |
+| `DB_PASSWORD` | `123` | *votre mot de passe install* |
+| `DB_NAME` | `job_finder` | `job_finder` |
+
+**Test de connexion**
+
+```powershell
+psql -U postgres -h localhost -p 5432 -d job_finder -c "SELECT 1;"
+```
+
+Si erreur `database does not exist` → refaire l'étape 6.3.  
+Si erreur `password authentication failed` → corriger `DB_PASSWORD` dans `.env`.
+
+### 6.6 PostgreSQL sur port 8080 (optionnel, comme la machine de dev)
+
+Si vous voulez reproduire exactement le port **8080** :
+
+- Soit configurer PostgreSQL pour écouter sur 8080 (fichier `postgresql.conf` : `port = 8080`),
+- Soit garder **5432** et mettre `DB_PORT=5432` dans `.env` (recommandé sur un nouveau PC).
+
+Le script `start-all.ps1` tente de lancer Postgres 18 sur 8080 avec un chemin fixe — **à adapter** si votre version/chemin diffère (voir §8).
 
 ---
 
@@ -236,14 +309,16 @@ Si PostgreSQL écoute sur **5432**, modifier `DB_PORT=5432` dans `job-finder-bac
 
 ```env
 DB_HOST=localhost
-DB_PORT=8080
+DB_PORT=5432
 DB_USERNAME=postgres
-DB_PASSWORD=123
+DB_PASSWORD=VOTRE_MOT_DE_PASSE
 DB_NAME=job_finder
-JWT_SECRET=changez_moi_en_production
+JWT_SECRET=local_dev_change_me
 PORT=3000
 NODE_ENV=development
 ```
+
+> Copier depuis `.env.example` puis modifier `DB_PASSWORD` et `DB_PORT`.
 
 ### Frontend — `job-finder-frontend/.env`
 
@@ -251,44 +326,51 @@ NODE_ENV=development
 VITE_API_BASE_URL=http://localhost:3000/api
 ```
 
-### Python (optionnel)
+### Fichiers sensibles
 
-```env
-EMOTION_MODEL_PATH=emotiondetection/models/binary_emotion_model.h5
-FACE_LANDMARKER_PATH=<racine-projet>/face_landmarker.task
-```
+Ne **jamais** committer `.env` (déjà dans `.gitignore`). Chaque développeur crée le sien depuis `.env.example`.
 
 ---
 
 ## 8. Démarrage des services
 
-### Méthode rapide (Windows)
+### Ordre recommandé
 
-À la racine du projet :
+1. **PostgreSQL** (service démarré + base `job_finder` créée)
+2. **Backend** NestJS
+3. **Frontend** Vite
+
+### Méthode A — Script automatique (Windows)
+
+À la **racine** du projet (`pfe_final`) :
 
 ```powershell
 .\start-all.ps1
 ```
 
-Ouvre 3 fenêtres : PostgreSQL (si port 8080 libre), backend, frontend.
+- Ouvre des fenêtres PowerShell pour backend et frontend.
+- Tente de lancer PostgreSQL sur le port **8080** si rien n'écoute (chemin par défaut : `C:\Program Files\PostgreSQL\18\...`).
 
-| Service | URL |
-|---------|-----|
-| Frontend | http://localhost:5173 |
-| API | http://localhost:3000/api |
-| PostgreSQL | localhost:**8080** |
+**Si PostgreSQL est déjà sur 5432** : démarrer le service Windows, mettre `DB_PORT=5432` dans `.env`, et lancer backend/frontend manuellement (méthode B).
 
-### Méthode manuelle
+### Méthode B — Manuelle (recommandée sur nouveau PC)
 
-**Terminal 1 — PostgreSQL** (si pas déjà démarré sur le bon port)
+**Terminal 1 — Vérifier PostgreSQL**
+
+```powershell
+psql -U postgres -h localhost -p 5432 -d job_finder -c "SELECT version();"
+```
 
 **Terminal 2 — Backend**
 
 ```powershell
 cd plateform\jobfinderportal-master\job-finder-backend
-$env:DB_PORT = "8080"
+# Adapter le port si besoin :
+$env:DB_PORT = "5432"
 npm run start:dev
 ```
+
+Attendre le message : `Nest application successfully started`.
 
 **Terminal 3 — Frontend**
 
@@ -297,37 +379,91 @@ cd plateform\jobfinderportal-master\job-finder-frontend
 npm run dev
 ```
 
-### Vérifier que l'API répond
+### Libérer le port 3000 si occupé
+
+```powershell
+Get-NetTCPConnection -LocalPort 3000 -State Listen -ErrorAction SilentlyContinue |
+  ForEach-Object { Stop-Process -Id $_.OwningProcess -Force }
+```
+
+### Arrêter les services
+
+```powershell
+.\stop-all.ps1
+```
+
+(Fermer aussi les fenêtres PowerShell ou `Ctrl+C` dans chaque terminal.)
+
+---
+
+## 9. Vérification que tout fonctionne
+
+### 9.1 API
 
 ```powershell
 curl http://localhost:3000/api/jobs
 ```
 
+Réponse JSON (éventuellement `[]`) = backend OK.
+
+### 9.2 Frontend
+
+Ouvrir http://localhost:5173 — la page d'accueil s'affiche.
+
+### 9.3 Base de données
+
+Après démarrage backend, dans pgAdmin ou psql :
+
+```sql
+\c job_finder
+\dt
+```
+
+Vous devez voir des tables (`users`, `job_postings`, `applications`, `job_applications`, `interviews`, etc.).
+
+### 9.4 Python (venv)
+
+```powershell
+chatbot\.venv\Scripts\python.exe --version
+emotiondetection\.venv\Scripts\python.exe -c "import cv2; import tensorflow; print('OK')"
+```
+
+### 9.5 Parcours complet (manuel)
+
+| Étape | URL | Résultat attendu |
+|-------|-----|------------------|
+| Inscription HR | http://localhost:5173/register | Compte créé, redirection dashboard |
+| Inscription candidat | http://localhost:5173/job-seeker/register | Compte candidat |
+| Créer offre | `/hr/jobs` | Offre visible |
+| Postuler | `/job-seeker/search` | Candidature dans My Applications |
+| Approuver + planifier | `/hr/jobs/:id/applicants` | Statut interview_scheduled |
+| Entretien | `/job-seeker/interview/:id` | Caméra + monitoring (calibration ~45 s) |
+| Rapport HR | `/hr/reports/:interviewId` | Scores, émotions, gaze, phone |
+
 ---
 
-## 9. Flux métier
+## 10. Flux métier
 
 ### RH
 
 1. `/register` → compte HR  
 2. `/hr/dashboard` → statistiques  
 3. `/hr/jobs` → créer une offre  
-4. `/hr/jobs/:id/applicants` → voir candidats, **Approve + Schedule**  
-5. Candidat passe l'entretien web  
-6. `/hr/reports/:interviewId` → rapport (Q&R, émotion, gaze, phone)  
-7. Changer statut (ex. **Rejected**) → reflété chez le candidat (`job_applications`)
+4. `/hr/jobs/:id/applicants` → **Approve + Schedule**  
+5. Rapport après entretien candidat  
+6. Changer statut (ex. **Rejected**) → visible côté candidat  
 
 ### Candidat
 
-1. `/job-seeker/register` → inscription  
-2. `/job-seeker/search` → postuler, **My Applications** (rafraîchissement auto)  
-3. Lien **Start Interview** quand planifié  
-4. `/job-seeker/interview/:jobPostingId` → caméra + monitoring live  
+1. `/job-seeker/register`  
+2. `/job-seeker/search` → postuler  
+3. **Start Interview** quand planifié  
+4. Autoriser caméra + micro  
 
 ### Mapping statuts HR → candidat
 
-| Statut HR | Statut candidat |
-|-----------|-----------------|
+| HR | Candidat |
+|----|----------|
 | pending | applied |
 | reviewed | reviewing |
 | shortlisted | shortlisted |
@@ -339,35 +475,31 @@ curl http://localhost:3000/api/jobs
 
 ---
 
-## 10. API principale
+## 11. API principale
 
-Préfixe global : **`/api`**
+Préfixe : **`/api`**
 
-| Méthode | Route | Auth | Description |
-|---------|-------|------|-------------|
-| POST | `/auth/register` | — | Inscription HR |
-| POST | `/auth/login` | — | Login HR (JWT) |
-| POST | `/auth/job-seeker/register` | — | Inscription candidat |
-| POST | `/auth/job-seeker/login` | — | Login candidat |
-| GET | `/jobs` | — | Offres publiques |
-| POST | `/job-postings` | HR | Créer offre |
-| GET | `/applications/job/:id` | HR | Candidats |
-| PATCH | `/applications/:id/status` | HR | Statut + sync candidat |
-| POST | `/applications/:id/approve-and-schedule` | HR | Planifier entretien |
-| POST | `/interviews/candidate/begin` | Candidat | Démarrer session |
-| POST | `/interviews/candidate/:id/emotion-frame` | Candidat | Frame + analyse IA |
-| POST | `/interviews/candidate/:id/finish` | Candidat | Fin + rapport |
-| GET | `/interviews/:id/report` | HR | Rapport |
-| GET | `/job-applications` | Candidat | Mes candidatures |
+| Méthode | Route | Auth |
+|---------|-------|------|
+| POST | `/auth/register` | — |
+| POST | `/auth/login` | HR |
+| POST | `/auth/job-seeker/register` | — |
+| POST | `/auth/job-seeker/login` | Candidat |
+| GET | `/jobs` | — |
+| POST | `/job-postings` | HR |
+| PATCH | `/applications/:id/status` | HR |
+| POST | `/applications/:id/approve-and-schedule` | HR |
+| POST | `/interviews/candidate/begin` | Candidat |
+| POST | `/interviews/candidate/:id/emotion-frame` | Candidat |
+| POST | `/interviews/candidate/:id/finish` | Candidat |
+| GET | `/interviews/:id/report` | HR |
+| GET | `/job-applications` | Candidat |
 
 ---
 
-## 11. Modules Python (IA)
+## 12. Modules Python (IA)
 
-### Emotion / gaze / phone (production)
-
-- **Worker** : `emotiondetection/models/emotion_worker.py` (stdin JSON, lancé par NestJS)
-- **Standalone** (test webcam locale) :
+### Test standalone émotion (webcam locale)
 
 ```powershell
 cd emotiondetection
@@ -375,12 +507,9 @@ cd emotiondetection
 python models\interview_monitor.py
 ```
 
-Touches : `Q` quitter, `C` recalibrer le regard.
+`Q` quitter · `C` recalibrer le regard.
 
-### Chatbot (Whisper)
-
-- Appelé par le backend en fin d'entretien via `chatbot/api_runner.py`
-- **Standalone** (nécessite Ollama pour `hr_interview.py`) :
+### Chatbot interactif (optionnel, Ollama)
 
 ```powershell
 ollama serve
@@ -392,47 +521,26 @@ python hr_interview.py
 
 ---
 
-## 12. Optimisations & bonnes pratiques
-
-- **Worker Python persistant** : évite de recharger YOLO/MediaPipe à chaque frame (vs ancien subprocess par image).
-- **Frames candidat** : envoi ~3 s (équilibre charge réseau / réactivité gaze).
-- **Sync statuts** : à chaque `PATCH` HR + resync à la lecture des candidatures candidat (requête groupée côté API).
-- **Preview annotée** : le backend renvoie `previewBase64` (même rendu que le moniteur Python).
-- **Production** : désactiver `synchronize: true`, utiliser migrations TypeORM, changer `JWT_SECRET`, HTTPS.
-
-Fichiers à ne **pas** committer (déjà dans `.gitignore`) : `.env`, `node_modules/`, `.venv/`, `.runtime/`. Les **modèles et le dataset** sont versionnés dans ce dépôt privé.
-
----
-
 ## 13. Dépannage
 
 | Problème | Solution |
 |----------|----------|
-| `EADDRINUSE :::3000` | `Get-NetTCPConnection -LocalPort 3000` puis arrêter le PID, relancer le backend |
-| `Cannot connect to PostgreSQL` | Vérifier service PostgreSQL, `DB_PORT`, base `job_finder` créée |
-| `Cannot POST /api/interviews/candidate/...` | Backend pas à jour ou pas redémarré |
-| Rapport 0 frames / 0% | venv Python manquant, erreur worker → logs terminal backend |
-| Gaze ne réagit pas | Regarder la caméra pendant calibration **(15 frames)** ; vérifier `face_landmarker.task` |
-| Premier frame très lent | Téléchargement/chargement YOLO (normal, 30–60 s) |
-| Statut candidat pas à jour | Rafraîchir onglet Applications ; vérifier email identique HR/candidat |
+| `EADDRINUSE :::3000` | Libérer le port 3000 (§8) puis relancer le backend |
+| `Cannot connect to PostgreSQL` | Service PostgreSQL démarré ? Base `job_finder` créée ? `DB_PORT` / `DB_PASSWORD` corrects dans `.env` ? |
+| Backend démarre puis crash DB | Tester `psql` avec les mêmes identifiants que `.env` |
+| Tables absentes | `NODE_ENV=development` + redémarrer backend une fois connecté à la bonne base |
+| `Cannot POST /api/interviews/candidate/...` | Backend pas démarré ou ancienne version — `git pull` + `npm run start:dev` |
+| Rapport 0 frames | venv Python manquant ou erreur dans la console backend |
+| Gaze inactif | Regarder l'écran pendant **Calibrating gaze (15/15)** |
+| Premier frame lent (30–60 s) | Chargement YOLO au premier envoi — normal |
 | `npm install` ERESOLVE | `npm install --legacy-peer-deps` dans le backend |
+| `start-all.ps1` ne lance pas PostgreSQL | Démarrer le service Windows manuellement ; adapter le chemin/version PG dans le script |
+| Frontend « Network error » | Backend sur 3000 ? `VITE_API_BASE_URL` correct ? |
 
 ---
 
-## 14. Comptes de test
+## Licence
 
-Aucun compte par défaut : créer un HR et un candidat via l'interface.
+Projet PFE — plateforme RH avec modules IA (NestJS, React, Python).
 
-**Recette rapide**
-
-1. HR : créer offre → candidat postule → HR approuve + planifie  
-2. Candidat : entretien (caméra, attendre calibration, tester regard/téléphone)  
-3. HR : rapport + passer en Rejected → candidat voit **Rejected**  
-
----
-
-## Licence & crédits
-
-Projet de fin d'études (PFE) — plateforme RH avec modules IA intégrés.
-
-Pour toute question technique, se référer uniquement à **ce fichier** et au code source ; les anciens guides (`CURSOR_INSTRUCTIONS`, README dispersés) ont été retirés du dépôt.
+**Dépôt** : https://github.com/DaEses/pfe_final (privé)

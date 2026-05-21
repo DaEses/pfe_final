@@ -1,13 +1,8 @@
--- PostgreSQL — initialisation base Job Finder
--- Adapter le port si PostgreSQL n'écoute pas sur 8080 (voir README_FINAL.md).
+-- Création de la base PostgreSQL pour Job Finder
+-- Usage (adapter -p 5432 ou 8080 selon votre installation) :
+--   psql -U postgres -h localhost -p 5432 -f scripts/init-database.sql
 
-CREATE DATABASE job_finder
-  WITH ENCODING 'UTF8'
-       LC_COLLATE = 'en_US.UTF-8'
-       LC_CTYPE = 'en_US.UTF-8'
-       TEMPLATE template0;
+CREATE DATABASE job_finder;
 
--- Sous Windows, si la commande ci-dessus échoue (locale), utiliser plutôt :
--- CREATE DATABASE job_finder;
-
--- Les tables sont créées automatiquement par TypeORM (synchronize) au premier démarrage du backend en NODE_ENV=development.
+-- Les tables sont créées automatiquement par TypeORM au premier
+-- démarrage du backend (NODE_ENV=development, synchronize=true).
