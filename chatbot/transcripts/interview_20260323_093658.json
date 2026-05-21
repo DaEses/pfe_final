@@ -1,0 +1,20 @@
+{
+  "job_role": "data analysis",
+  "date": "2026-03-23T09:36:58.304700",
+  "average_score": 0,
+  "scores": [],
+  "transcript": [
+    {
+      "role": "HR Manager",
+      "content": "Welcome Esra! It's great to meet you today. Before we dive into the questions, can you please introduce yourself and tell me a little bit about your background?\n\n(Please respond with your answer)\n\n(Note: I'll wait for your response before proceeding)"
+    },
+    {
+      "role": "Candidate",
+      "content": "I am an applied ai student and currently doing my end of study internship as a machine learning engineer and last summer i have done an internship as a data scientist"
+    },
+    {
+      "role": "HR Manager",
+      "content": "Thank you for sharing that, Esra! It's great to hear about your educational background and internship experiences.\n\nSCORE: 8/10 (You provided a clear introduction, but could have been more specific about the companies or projects you worked on during those internships. However, it gives me a good starting point to ask more targeted questions!)\n\nNext question:\n\nCan you tell me more about your experience with Python? You've listed it as one of your skills on your resume. Can you give an example of a project or task where you used Python to analyze data?\n\n(Please respond with your answer)"
+    }
+  ]
+}

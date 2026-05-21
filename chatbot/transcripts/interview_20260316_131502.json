@@ -1,0 +1,22 @@
+{
+  "job_role": "Data Science",
+  "date": "2026-03-16T13:15:02.493359",
+  "average_score": 0.0,
+  "scores": [
+    0
+  ],
+  "transcript": [
+    {
+      "role": "HR Manager",
+      "content": "Welcome to the interview! I'm thrilled to have Esra Marzouki joining me today. Can you please introduce yourself and tell me a little bit about your background?\n\n(Please respond as Esra Marzouki)"
+    },
+    {
+      "role": "Candidate",
+      "content": "i am an applied ai studen and ai enthusiast, I have worked as a data science intern during last summer and I'm looking forword to learning more"
+    },
+    {
+      "role": "HR Manager",
+      "content": "Thank you for introducing yourself, Esra! It's great to hear about your passion for AI and your experience as a data science intern. That sounds like a fantastic opportunity.\n\nLet's dive right in, shall we? Our first question is:\n\nCan you walk me through the project you worked on during your internship at Optimal Solution, where you developed an intelligent energy monitoring system using Raspberry Pi 4 and YOLO object detection? What were some of the key challenges you faced, and how did you overcome them?\n\n(Please respond as Esra Marzouki)\n\n[SCORE: 0/10]"
+    }
+  ]
+}

@@ -1,0 +1,136 @@
+.interview-report {
+  max-width: 800px;
+  margin: 0 auto;
+  padding: 24px;
+}
+
+.report-header {
+  margin-bottom: 32px;
+}
+
+.report-header h1 {
+  font-size: 28px;
+  font-weight: 700;
+  color: #1a1a2e;
+  margin-bottom: 8px;
+}
+
+.report-header .candidate-name {
+  font-size: 16px;
+  color: #666;
+}
+
+.report-card {
+  background: #fff;
+  border-radius: 12px;
+  padding: 24px;
+  margin-bottom: 20px;
+  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
+  border: 1px solid #e8ecf0;
+}
+
+.report-card h3 {
+  font-size: 18px;
+  font-weight: 600;
+  color: #1a1a2e;
+  margin-bottom: 16px;
+  padding-bottom: 12px;
+  border-bottom: 1px solid #e8ecf0;
+}
+
+.report-note {
+  font-size: 14px;
+  color: #5c6370;
+  margin-bottom: 16px;
+  line-height: 1.5;
+}
+
+.score-card {
+  text-align: center;
+}
+
+.score-value {
+  font-size: 48px;
+  font-weight: 800;
+  color: var(--accent, #667eea);
+  margin: 8px 0 0;
+}
+
+.recommendation-text {
+  font-size: 15px;
+  line-height: 1.7;
+  color: #444;
+  background: #f8f9fc;
+  padding: 16px;
+  border-radius: 8px;
+  border-left: 4px solid #667eea;
+}
+
+.qa-item {
+  margin-bottom: 20px;
+  padding-bottom: 20px;
+  border-bottom: 1px solid #f0f0f0;
+}
+
+.qa-item:last-child {
+  border-bottom: none;
+  margin-bottom: 0;
+  padding-bottom: 0;
+}
+
+.qa-question {
+  font-weight: 600;
+  color: #1a1a2e;
+  margin-bottom: 8px;
+  font-size: 14px;
+}
+
+.qa-answer {
+  color: #555;
+  font-size: 14px;
+  line-height: 1.6;
+  padding-left: 12px;
+  border-left: 2px solid #e8ecf0;
+}
+
+.emotion-grid {
+  display: grid;
+  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
+  gap: 12px;
+}
+
+.emotion-stat {
+  background: #f8f9fc;
+  border-radius: 8px;
+  padding: 12px 16px;
+  text-align: center;
+}
+
+.emotion-stat-label {
+  font-size: 12px;
+  color: #888;
+  text-transform: uppercase;
+  letter-spacing: 0.5px;
+  margin-bottom: 4px;
+}
+
+.emotion-stat-value {
+  font-size: 20px;
+  font-weight: 700;
+  color: #1a1a2e;
+}
+
+.risk-high { color: #e53e3e; }
+.risk-medium { color: #dd6b20; }
+.risk-low { color: #38a169; }
+
+.interview-report .loading,
+.interview-report .error-message {
+  padding: 40px;
+  text-align: center;
+  font-size: 16px;
+}
+
+.interview-report .error-message {
+  color: #e53e3e;
+}

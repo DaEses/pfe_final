@@ -1,0 +1,161 @@
+.footer-area {
+  background: #222;
+  color: #ccc;
+  padding: 40px 0 20px;
+}
+
+.footer-bg {
+  background: linear-gradient(135deg, #222 0%, #1a1a1a 100%);
+}
+
+.footer-padding {
+  padding: 40px 0;
+}
+
+.single-footer-caption {
+  margin-bottom: 30px;
+}
+
+.footer-tittle h4 {
+  color: white;
+  font-size: 18px;
+  margin-bottom: 20px;
+  font-weight: 600;
+}
+
+.footer-pera p {
+  color: #aaa;
+  line-height: 1.8;
+  margin: 0;
+}
+
+.footer-tittle ul {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+}
+
+.footer-tittle ul li {
+  margin-bottom: 10px;
+}
+
+.footer-tittle ul li a,
+.footer-tittle ul li p {
+  color: #aaa;
+  text-decoration: none;
+  transition: color 0.3s;
+}
+
+.footer-tittle ul li a:hover {
+  color: #ff6b6b;
+}
+
+.footer-form form {
+  display: flex;
+  gap: 5px;
+}
+
+.footer-form input {
+  flex: 1;
+  padding: 10px;
+  border: none;
+  border-radius: 5px;
+  font-size: 14px;
+}
+
+.footer-form button {
+  padding: 10px 20px;
+  background: #ff6b6b;
+  color: white;
+  border: none;
+  border-radius: 5px;
+  cursor: pointer;
+  font-weight: 600;
+  transition: background 0.3s;
+}
+
+.footer-form button:hover {
+  background: #ff5252;
+}
+
+.footer-logo img {
+  max-height: 40px;
+  width: auto;
+  margin-bottom: 15px;
+}
+
+.footer-wejed {
+  border-top: 1px solid #444;
+  padding-top: 30px;
+  margin-top: 30px;
+}
+
+.footer-tittle-bottom {
+  text-align: center;
+}
+
+.footer-number {
+  display: block;
+  font-size: 28px;
+  font-weight: 700;
+  color: #ff6b6b;
+}
+
+.footer-text {
+  color: #aaa;
+  font-size: 14px;
+}
+
+.footer-bottom {
+  background: #111;
+  padding: 20px 0;
+  border-top: 1px solid #444;
+  margin-top: 20px;
+}
+
+.footer-bottom p {
+  color: #888;
+  margin: 0;
+}
+
+.footer-links {
+  list-style: none;
+  padding: 0;
+  margin: 0;
+  display: flex;
+  gap: 20px;
+  justify-content: flex-end;
+}
+
+.footer-links li a {
+  color: #888;
+  text-decoration: none;
+  transition: color 0.3s;
+}
+
+.footer-links li a:hover {
+  color: #ff6b6b;
+}
+
+.text-right {
+  text-align: right;
+}
+
+@media (max-width: 768px) {
+  .footer-links {
+    justify-content: flex-start;
+  }
+
+  .footer-tittle h4 {
+    font-size: 16px;
+  }
+
+  .footer-bottom {
+    text-align: center;
+  }
+
+  .footer-bottom p,
+  .text-right {
+    text-align: center;
+  }
+}
