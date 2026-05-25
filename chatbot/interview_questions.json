@@ -1,0 +1,161 @@
+{
+  "version": 1,
+  "defaultCount": 6,
+  "questions": [
+    {
+      "id": "intro_1",
+      "category": "introduction",
+      "template": "Please introduce yourself and explain why you are interested in the {job_role} role."
+    },
+    {
+      "id": "intro_2",
+      "category": "introduction",
+      "template": "Walk us through your background and what motivated you to apply for this {job_role} position."
+    },
+    {
+      "id": "project_1",
+      "category": "experience",
+      "template": "Tell us about a project you are proud of that is relevant to {job_role}."
+    },
+    {
+      "id": "project_2",
+      "category": "experience",
+      "template": "Describe a technical or professional achievement that demonstrates your fit for {job_role}."
+    },
+    {
+      "id": "project_3",
+      "category": "experience",
+      "template": "Share a project where you had to learn something new quickly. What was your approach?"
+    },
+    {
+      "id": "team_1",
+      "category": "teamwork",
+      "template": "Describe a challenge you solved with a team. What was your role?"
+    },
+    {
+      "id": "team_2",
+      "category": "teamwork",
+      "template": "Tell us about a time you disagreed with a colleague. How did you handle it?"
+    },
+    {
+      "id": "team_3",
+      "category": "teamwork",
+      "template": "Give an example of how you gave or received constructive feedback on a project."
+    },
+    {
+      "id": "pressure_1",
+      "category": "behavioral",
+      "template": "How do you handle deadlines and pressure when priorities change?"
+    },
+    {
+      "id": "pressure_2",
+      "category": "behavioral",
+      "template": "Tell us about a time you missed a deadline or made a mistake. What did you learn?"
+    },
+    {
+      "id": "pressure_3",
+      "category": "behavioral",
+      "template": "Describe a situation where you had to manage multiple tasks at once. How did you prioritize?"
+    },
+    {
+      "id": "problem_1",
+      "category": "problem_solving",
+      "template": "Tell us about a difficult problem you solved. What steps did you take?"
+    },
+    {
+      "id": "problem_2",
+      "category": "problem_solving",
+      "template": "Describe a situation where your first solution did not work. What did you do next?"
+    },
+    {
+      "id": "problem_3",
+      "category": "problem_solving",
+      "template": "How do you approach debugging or investigating an issue you have never seen before?"
+    },
+    {
+      "id": "tech_1",
+      "category": "technical",
+      "template": "Which tools or technologies do you use most often for work related to {job_role}, and why?"
+    },
+    {
+      "id": "tech_2",
+      "category": "technical",
+      "template": "Explain a technical concept you use regularly in simple terms, as if speaking to a non-expert."
+    },
+    {
+      "id": "tech_3",
+      "category": "technical",
+      "template": "What is the most complex feature or system you have built or contributed to?"
+    },
+    {
+      "id": "quality_1",
+      "category": "technical",
+      "template": "How do you ensure quality in your work (tests, reviews, documentation, etc.)?"
+    },
+    {
+      "id": "quality_2",
+      "category": "technical",
+      "template": "Describe how you stay up to date with best practices in your field."
+    },
+    {
+      "id": "motivation_1",
+      "category": "motivation",
+      "template": "Why do you want to join our company for this {job_role} opportunity?"
+    },
+    {
+      "id": "motivation_2",
+      "category": "motivation",
+      "template": "Where do you see yourself professionally in the next two to three years?"
+    },
+    {
+      "id": "motivation_3",
+      "category": "motivation",
+      "template": "What type of work environment helps you perform at your best?"
+    },
+    {
+      "id": "communication_1",
+      "category": "communication",
+      "template": "Tell us about a time you had to explain a complex idea to someone without your background."
+    },
+    {
+      "id": "communication_2",
+      "category": "communication",
+      "template": "How do you communicate progress and blockers to a manager or client?"
+    },
+    {
+      "id": "leadership_1",
+      "category": "leadership",
+      "template": "Have you ever mentored or helped a teammate? Describe that experience."
+    },
+    {
+      "id": "leadership_2",
+      "category": "leadership",
+      "template": "Tell us about a time you took initiative without being asked."
+    },
+    {
+      "id": "customer_1",
+      "category": "situational",
+      "template": "Describe a situation where you had to meet a demanding stakeholder or user expectation."
+    },
+    {
+      "id": "customer_2",
+      "category": "situational",
+      "template": "How would you handle conflicting requirements from two different stakeholders?"
+    },
+    {
+      "id": "ethics_1",
+      "category": "situational",
+      "template": "Tell us about a professional decision where ethics or integrity mattered."
+    },
+    {
+      "id": "closing_1",
+      "category": "closing",
+      "template": "What questions would you like to ask us about the team or the {job_role} role?"
+    },
+    {
+      "id": "closing_2",
+      "category": "closing",
+      "template": "Is there anything else we should know about your candidacy for {job_role}?"
+    }
+  ]
+}

@@ -187,14 +187,104 @@ export class InterviewService {
     }
   }
 
-  buildInterviewQuestions(jobRole: string): string[] {
-    return [
+  private async getPreviouslyUsedQuestionTexts(
+    applicantEmail: string,
+  ): Promise<string[]> {
+    const reports = await this.reportRepository
+      .createQueryBuilder('report')
+      .innerJoin('report.application', 'application')
+      .where('application.applicantEmail = :email', { email: applicantEmail })
+      .getMany();
+
+    const seen = new Set<string>();
+    for (const report of reports) {
+      const qas = report.questionsAnswers;
+      if (!Array.isArray(qas)) continue;
+      for (const qa of qas) {
+        const text = (qa as { question?: string }).question?.trim();
+        if (text) seen.add(text);
+      }
+    }
+    return [...seen];
+  }
+
+  private async pickInterviewQuestionsFromBank(
+    jobRole: string,
+    applicantEmail?: string,
+  ): Promise<{ questions: string[]; questionIds: string[] }> {
+    const projectRoot = this.getProjectRoot();
+    const chatbotDir = path.join(projectRoot, 'chatbot');
+    const python = this.resolvePythonExecutable(path.join(chatbotDir, '.venv'));
+    const cli = path.join(chatbotDir, 'pick_questions_cli.py');
+
+    const excludeTexts = applicantEmail
+      ? await this.getPreviouslyUsedQuestionTexts(applicantEmail)
+      : [];
+
+    const tmpDir = path.join(projectRoot, '.runtime');
+    fs.mkdirSync(tmpDir, { recursive: true });
+    const excludeFile = path.join(
+      tmpDir,
+      `exclude_questions_${Date.now()}.json`,
+    );
+    fs.writeFileSync(excludeFile, JSON.stringify(excludeTexts), 'utf8');
+
+    try {
+      const { stdout } = await execFileAsync(
+        python,
+        [
+          cli,
+          '--job-role',
+          jobRole,
+          '--exclude-texts-file',
+          excludeFile,
+        ],
+        { timeout: 30_000, maxBuffer: 2 * 1024 * 1024 },
+      );
+      const parsed = JSON.parse(stdout) as {
+        questions?: Array<{ id: string; question: string }>;
+      };
+      const items = parsed.questions ?? [];
+      return {
+        questions: items.map((q) => q.question),
+        questionIds: items.map((q) => q.id),
+      };
+    } catch (err) {
+      this.logger.warn(
+        `Question picker failed, using inline fallback: ${err instanceof Error ? err.message : err}`,
+      );
+      return this.buildInterviewQuestionsFallback(jobRole);
+    } finally {
+      try {
+        fs.unlinkSync(excludeFile);
+      } catch {
+        /* ignore */
+      }
+    }
+  }
+
+  private buildInterviewQuestionsFallback(jobRole: string): {
+    questions: string[];
+    questionIds: string[];
+  } {
+    const questions = [
       `Please introduce yourself for the ${jobRole} role.`,
       'Tell us about a project you are proud of.',
       'How do you handle deadlines and pressure?',
       'Describe a challenge you solved with your team.',
       'Why do you want to join this company?',
     ];
+    return {
+      questions,
+      questionIds: questions.map((_, i) => `fallback_${i + 1}`),
+    };
+  }
+
+  async buildInterviewQuestions(
+    jobRole: string,
+    applicantEmail?: string,
+  ): Promise<{ questions: string[]; questionIds: string[] }> {
+    return this.pickInterviewQuestionsFromBank(jobRole, applicantEmail);
   }
 
   private scoreWrittenAnswers(
@@ -605,11 +695,29 @@ export class InterviewService {
     await this.initEmotionSession(interview.id);
 
     const jobTitle = application.jobPosting?.title ?? 'this position';
+    const picked = await this.buildInterviewQuestions(jobTitle, applicantEmail);
+    const sessionDir = this.getEmotionSessionDir(interview.id);
+    fs.mkdirSync(sessionDir, { recursive: true });
+    fs.writeFileSync(
+      path.join(sessionDir, 'questions.json'),
+      JSON.stringify(
+        {
+          jobTitle,
+          questions: picked.questions,
+          questionIds: picked.questionIds,
+          pickedAt: new Date().toISOString(),
+        },
+        null,
+        2,
+      ),
+      'utf8',
+    );
     return {
       interviewId: interview.id,
       candidateName: application.applicantName,
       jobTitle,
-      questions: this.buildInterviewQuestions(jobTitle),
+      questions: picked.questions,
+      questionIds: picked.questionIds,
     };
   }
 
@@ -632,6 +740,24 @@ export class InterviewService {
     const application = interview.application;
     const emotionJson = await this.resolveEmotionSummary(interview);
     const score = this.computeOverallScore(questionsAnswers, emotionJson);
+
+    let questionIds: string[] = [];
+    const questionsMetaPath = path.join(
+      this.getEmotionSessionDir(interview.id),
+      'questions.json',
+    );
+    if (fs.existsSync(questionsMetaPath)) {
+      try {
+        const meta = JSON.parse(
+          fs.readFileSync(questionsMetaPath, 'utf8'),
+        ) as { questionIds?: string[] };
+        if (Array.isArray(meta.questionIds)) {
+          questionIds = meta.questionIds;
+        }
+      } catch {
+        /* ignore */
+      }
+    }
 
     const answerPreview = questionsAnswers
       .map((qa, i) => `Q${i + 1}: ${(qa.answer || '').slice(0, 80)}`)
@@ -656,13 +782,26 @@ export class InterviewService {
         questionsAnswers,
         emotionSummary: { ...emotionJson, overallScore: score },
         finalDecisionHints: recommendation,
-        rawArtifacts: { emotionSource: emotionJson.source ?? 'unknown' },
+        rawArtifacts: {
+          emotionSource: emotionJson.source ?? 'unknown',
+          questionIds:
+            questionIds.length > 0
+              ? questionIds
+              : questionsAnswers.map((_, i) => `q_${i + 1}`),
+        },
       });
     } else {
       report.questionsAnswers = questionsAnswers;
       report.emotionSummary = { ...emotionJson, overallScore: score };
       report.finalDecisionHints = recommendation;
-      report.rawArtifacts = { emotionSource: emotionJson.source ?? 'unknown' };
+      report.rawArtifacts = {
+        ...(report.rawArtifacts as Record<string, unknown>),
+        emotionSource: emotionJson.source ?? 'unknown',
+        questionIds:
+          questionIds.length > 0
+            ? questionIds
+            : (report.rawArtifacts as { questionIds?: string[] })?.questionIds,
+      };
     }
 
     interview.status = 'completed';
@@ -839,6 +978,15 @@ export class InterviewService {
       Math.max(10, Math.min(90, (interview.duration ?? 30) * 2)),
     );
 
+    const excludeTexts = await this.getPreviouslyUsedQuestionTexts(
+      application.applicantEmail,
+    );
+    const excludeFile = path.join(
+      artifactsDir,
+      `exclude_${interview.id}.json`,
+    );
+    fs.writeFileSync(excludeFile, JSON.stringify(excludeTexts), 'utf8');
+
     await this.execPythonSafe(
       chatbotPython,
       [
@@ -849,6 +997,8 @@ export class InterviewService {
         jobRole,
         '--answer-seconds',
         answerSeconds,
+        '--exclude-texts-file',
+        excludeFile,
         '--output',
         transcriptPath,
       ],
