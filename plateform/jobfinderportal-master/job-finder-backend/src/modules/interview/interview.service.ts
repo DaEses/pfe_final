@@ -166,11 +166,15 @@ export class InterviewService {
     fallback: Record<string, unknown>,
   ): Promise<void> {
     try {
+      this.logger.log(`[EXEC] Running: ${python} ${args.join(' ')}`);
       await execFileAsync(python, args, { timeout: 300_000, maxBuffer: 10 * 1024 * 1024 });
       if (!fs.existsSync(outputPath)) {
+        this.logger.error(`[EXEC] Output file not created: ${outputPath}`);
         throw new Error('Python script did not create output file');
       }
+      this.logger.log(`[EXEC] Success: ${outputPath}`);
     } catch (err) {
+      this.logger.error(`[EXEC] Error: ${err instanceof Error ? err.message : String(err)}`);
       fs.mkdirSync(path.dirname(outputPath), { recursive: true });
       fs.writeFileSync(
         outputPath,
@@ -187,104 +191,14 @@ export class InterviewService {
     }
   }
 
-  private async getPreviouslyUsedQuestionTexts(
-    applicantEmail: string,
-  ): Promise<string[]> {
-    const reports = await this.reportRepository
-      .createQueryBuilder('report')
-      .innerJoin('report.application', 'application')
-      .where('application.applicantEmail = :email', { email: applicantEmail })
-      .getMany();
-
-    const seen = new Set<string>();
-    for (const report of reports) {
-      const qas = report.questionsAnswers;
-      if (!Array.isArray(qas)) continue;
-      for (const qa of qas) {
-        const text = (qa as { question?: string }).question?.trim();
-        if (text) seen.add(text);
-      }
-    }
-    return [...seen];
-  }
-
-  private async pickInterviewQuestionsFromBank(
-    jobRole: string,
-    applicantEmail?: string,
-  ): Promise<{ questions: string[]; questionIds: string[] }> {
-    const projectRoot = this.getProjectRoot();
-    const chatbotDir = path.join(projectRoot, 'chatbot');
-    const python = this.resolvePythonExecutable(path.join(chatbotDir, '.venv'));
-    const cli = path.join(chatbotDir, 'pick_questions_cli.py');
-
-    const excludeTexts = applicantEmail
-      ? await this.getPreviouslyUsedQuestionTexts(applicantEmail)
-      : [];
-
-    const tmpDir = path.join(projectRoot, '.runtime');
-    fs.mkdirSync(tmpDir, { recursive: true });
-    const excludeFile = path.join(
-      tmpDir,
-      `exclude_questions_${Date.now()}.json`,
-    );
-    fs.writeFileSync(excludeFile, JSON.stringify(excludeTexts), 'utf8');
-
-    try {
-      const { stdout } = await execFileAsync(
-        python,
-        [
-          cli,
-          '--job-role',
-          jobRole,
-          '--exclude-texts-file',
-          excludeFile,
-        ],
-        { timeout: 30_000, maxBuffer: 2 * 1024 * 1024 },
-      );
-      const parsed = JSON.parse(stdout) as {
-        questions?: Array<{ id: string; question: string }>;
-      };
-      const items = parsed.questions ?? [];
-      return {
-        questions: items.map((q) => q.question),
-        questionIds: items.map((q) => q.id),
-      };
-    } catch (err) {
-      this.logger.warn(
-        `Question picker failed, using inline fallback: ${err instanceof Error ? err.message : err}`,
-      );
-      return this.buildInterviewQuestionsFallback(jobRole);
-    } finally {
-      try {
-        fs.unlinkSync(excludeFile);
-      } catch {
-        /* ignore */
-      }
-    }
-  }
-
-  private buildInterviewQuestionsFallback(jobRole: string): {
-    questions: string[];
-    questionIds: string[];
-  } {
-    const questions = [
+  buildInterviewQuestions(jobRole: string): string[] {
+    return [
       `Please introduce yourself for the ${jobRole} role.`,
       'Tell us about a project you are proud of.',
       'How do you handle deadlines and pressure?',
       'Describe a challenge you solved with your team.',
       'Why do you want to join this company?',
     ];
-    return {
-      questions,
-      questionIds: questions.map((_, i) => `fallback_${i + 1}`),
-    };
-  }
-
-  async buildInterviewQuestions(
-    jobRole: string,
-    applicantEmail?: string,
-  ): Promise<{ questions: string[]; questionIds: string[] }> {
-    return this.pickInterviewQuestionsFromBank(jobRole, applicantEmail);
   }
 
   private scoreWrittenAnswers(
@@ -316,9 +230,11 @@ export class InterviewService {
 
     const frames = Number(emotionSummary.framesAnalyzed) || 0;
     const phones = Number(emotionSummary.phoneDetections) || 0;
+    const papers = Number(emotionSummary.paperDetections) || 0;
     if (frames >= 15) score += 1;
     if (frames < 5) score -= 1;
     if (phones > 0) score -= Math.min(2, phones);
+    if (papers > 0) score -= Math.min(2, Math.floor(papers / 5));  // Penalize if >5 paper detections
 
     return Math.max(1, Math.min(10, score));
   }
@@ -695,29 +611,11 @@ export class InterviewService {
     await this.initEmotionSession(interview.id);
 
     const jobTitle = application.jobPosting?.title ?? 'this position';
-    const picked = await this.buildInterviewQuestions(jobTitle, applicantEmail);
-    const sessionDir = this.getEmotionSessionDir(interview.id);
-    fs.mkdirSync(sessionDir, { recursive: true });
-    fs.writeFileSync(
-      path.join(sessionDir, 'questions.json'),
-      JSON.stringify(
-        {
-          jobTitle,
-          questions: picked.questions,
-          questionIds: picked.questionIds,
-          pickedAt: new Date().toISOString(),
-        },
-        null,
-        2,
-      ),
-      'utf8',
-    );
     return {
       interviewId: interview.id,
       candidateName: application.applicantName,
       jobTitle,
-      questions: picked.questions,
-      questionIds: picked.questionIds,
+      questions: this.buildInterviewQuestions(jobTitle),
     };
   }
 
@@ -741,27 +639,24 @@ export class InterviewService {
     const emotionJson = await this.resolveEmotionSummary(interview);
     const score = this.computeOverallScore(questionsAnswers, emotionJson);
 
-    let questionIds: string[] = [];
-    const questionsMetaPath = path.join(
-      this.getEmotionSessionDir(interview.id),
-      'questions.json',
-    );
-    if (fs.existsSync(questionsMetaPath)) {
-      try {
-        const meta = JSON.parse(
-          fs.readFileSync(questionsMetaPath, 'utf8'),
-        ) as { questionIds?: string[] };
-        if (Array.isArray(meta.questionIds)) {
-          questionIds = meta.questionIds;
-        }
-      } catch {
-        /* ignore */
-      }
-    }
-
     const answerPreview = questionsAnswers
       .map((qa, i) => `Q${i + 1}: ${(qa.answer || '').slice(0, 80)}`)
       .join(' | ');
+
+    // Build recommendation with fraud alerts
+    let fraudWarning = '';
+    const phones = Number(emotionJson.phoneDetections) || 0;
+    const papers = Number(emotionJson.paperDetections) || 0;
+    const gazeAlerts = Number(emotionJson.gazeAlerts) || 0;
+    if (phones > 0) {
+      fraudWarning = ` [ALERT] Phone detected ${phones} times during interview.`;
+    }
+    if (papers > 0) {
+      fraudWarning += ` [ALERT] Paper/documents detected ${papers} times during interview.`;
+    }
+    if (gazeAlerts > 3) {
+      fraudWarning += ` [ALERT] Excessive gaze deviation (${gazeAlerts} alerts).`;
+    }
 
     const recommendation = `Overall score: ${score}/10 (65% written answers, 35% presence). ${answerPreview}. ${
       score >= 7
@@ -769,7 +664,7 @@ export class InterviewService {
         : score >= 5
           ? 'Moderate performance — HR review recommended.'
           : 'Below expectations — consider follow-up or rejection.'
-    }`;
+    }${fraudWarning}`;
 
     let report = await this.reportRepository.findOne({
       where: { interviewId: interview.id },
@@ -782,26 +677,13 @@ export class InterviewService {
         questionsAnswers,
         emotionSummary: { ...emotionJson, overallScore: score },
         finalDecisionHints: recommendation,
-        rawArtifacts: {
-          emotionSource: emotionJson.source ?? 'unknown',
-          questionIds:
-            questionIds.length > 0
-              ? questionIds
-              : questionsAnswers.map((_, i) => `q_${i + 1}`),
-        },
+        rawArtifacts: { emotionSource: emotionJson.source ?? 'unknown' },
       });
     } else {
       report.questionsAnswers = questionsAnswers;
       report.emotionSummary = { ...emotionJson, overallScore: score };
       report.finalDecisionHints = recommendation;
-      report.rawArtifacts = {
-        ...(report.rawArtifacts as Record<string, unknown>),
-        emotionSource: emotionJson.source ?? 'unknown',
-        questionIds:
-          questionIds.length > 0
-            ? questionIds
-            : (report.rawArtifacts as { questionIds?: string[] })?.questionIds,
-      };
+      report.rawArtifacts = { emotionSource: emotionJson.source ?? 'unknown' };
     }
 
     interview.status = 'completed';
@@ -959,7 +841,7 @@ export class InterviewService {
     const emotionDir = path.join(projectRoot, 'emotiondetection');
     const chatbotPython = this.resolvePythonExecutable(path.join(chatbotDir, '.venv'));
     const emotionPython = this.resolvePythonExecutable(path.join(emotionDir, '.venv'));
-    const chatbotScript = path.join(chatbotDir, 'api_runner.py');
+    const chatbotScript = path.join(chatbotDir, 'hr_interview.py');
     const emotionScript = path.join(emotionDir, 'models', 'api_runner.py');
 
     const artifactsDir = path.join(projectRoot, '.runtime', 'interviews');
@@ -978,29 +860,30 @@ export class InterviewService {
       Math.max(10, Math.min(90, (interview.duration ?? 30) * 2)),
     );
 
-    const excludeTexts = await this.getPreviouslyUsedQuestionTexts(
-      application.applicantEmail,
-    );
-    const excludeFile = path.join(
-      artifactsDir,
-      `exclude_${interview.id}.json`,
-    );
-    fs.writeFileSync(excludeFile, JSON.stringify(excludeTexts), 'utf8');
+    // Create a temporary resume file if provided
+    let resumePath = '';
+    if (application.applicantResume) {
+      resumePath = path.join(
+        artifactsDir,
+        `resume_${interview.id}.txt`,
+      );
+      try {
+        fs.writeFileSync(resumePath, application.applicantResume, 'utf8');
+      } catch (e) {
+        this.logger.warn(`Failed to write resume file: ${e}`);
+        resumePath = '';
+      }
+    }
 
     await this.execPythonSafe(
       chatbotPython,
       [
         chatbotScript,
-        '--candidate-name',
-        application.applicantName,
         '--job-role',
         jobRole,
-        '--answer-seconds',
-        answerSeconds,
-        '--exclude-texts-file',
-        excludeFile,
         '--output',
         transcriptPath,
+        ...(!resumePath ? [] : ['--resume', resumePath]),
       ],
       transcriptPath,
       this.buildFallbackTranscript(application),

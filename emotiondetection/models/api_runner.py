@@ -6,7 +6,7 @@ from datetime import datetime
 
 import cv2
 
-from interview_monitor import PhoneDetector, GazeDetector, face_cascade, predict_face
+from interview_monitor import PhoneDetector, PaperDetector, GazeDetector, face_cascade, predict_face
 
 
 def capture_emotion_summary(duration_seconds: int):
@@ -20,6 +20,7 @@ def capture_emotion_summary(duration_seconds: int):
 
     gaze = GazeDetector()
     phone = PhoneDetector()
+    paper = PaperDetector(yolo_model=phone._model)  # Reuse YOLO model
     gaze.calibrate(cap, display=False)
 
     start = time.time()
@@ -28,6 +29,7 @@ def capture_emotion_summary(duration_seconds: int):
     irritated_count = 0
     gaze_alerts = 0
     phone_frames = 0
+    paper_frames = 0
 
     try:
         while time.time() - start < duration_seconds:
@@ -53,6 +55,9 @@ def capture_emotion_summary(duration_seconds: int):
 
             if len(phone.process(frame)) > 0:
                 phone_frames += 1
+            
+            if len(paper.process(frame)) > 0:
+                paper_frames += 1
     finally:
         cap.release()
 
@@ -62,9 +67,9 @@ def capture_emotion_summary(duration_seconds: int):
     dominant = "NEUTRAL" if neutral_ratio >= irritated_ratio else "IRRITATED"
 
     risk_level = "low"
-    if irritated_ratio > 0.45 or gaze_alerts > 5 or phone_frames > 10:
+    if irritated_ratio > 0.45 or gaze_alerts > 5 or phone_frames > 10 or paper_frames > 15:
         risk_level = "high"
-    elif irritated_ratio > 0.25 or gaze_alerts > 2 or phone_frames > 4:
+    elif irritated_ratio > 0.25 or gaze_alerts > 2 or phone_frames > 4 or paper_frames > 8:
         risk_level = "medium"
 
     return {
@@ -75,6 +80,7 @@ def capture_emotion_summary(duration_seconds: int):
         "irritatedRatio": round(irritated_ratio, 3),
         "gazeAlerts": gaze_alerts,
         "phoneDetections": phone_frames,
+        "paperDetections": paper_frames,
         "riskLevel": risk_level,
     }
 
@@ -90,7 +96,7 @@ def main():
     with open(args.output, "w", encoding="utf-8") as fp:
         json.dump(payload, fp, indent=2)
 
-    print(args.output)
+    # print(args.output)  # Suppressed to avoid JSON parse errors in backend
 
 
 if __name__ == "__main__":

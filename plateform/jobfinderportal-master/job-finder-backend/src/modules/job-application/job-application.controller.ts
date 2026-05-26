@@ -19,7 +19,7 @@ export class JobApplicationController {
 
   @Post()
   async createApplication(
-    @Body() body: { jobPostingId: string; coverLetter?: string },
+    @Body() body: { jobPostingId: string; coverLetter?: string; applicantResume?: string },
     @Req() req: AuthenticatedJobSeekerRequest,
   ) {
     try {
@@ -27,6 +27,7 @@ export class JobApplicationController {
         req.user.id,
         body.jobPostingId,
         body.coverLetter,
+        body.applicantResume,
       );
       return { success: true, data: result };
     } catch (error) {

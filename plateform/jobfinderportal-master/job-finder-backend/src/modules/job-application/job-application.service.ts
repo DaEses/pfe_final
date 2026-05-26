@@ -23,6 +23,7 @@ export class JobApplicationService {
     jobSeekerId: string,
     jobPostingId: string,
     coverLetter?: string,
+    applicantResume?: string,
   ) {
     const existingApp = await this.jobApplicationRepository.findOne({
       where: { jobSeekerId, jobPostingId },
@@ -56,6 +57,7 @@ export class JobApplicationService {
           applicantName: `${seeker.firstName} ${seeker.lastName}`,
           applicantEmail: seeker.email,
           applicantPhone: seeker.phone || '',
+          applicantResume: applicantResume || '',
           jobPostingId,
           coverLetter: coverLetter || undefined,
           status: 'pending',

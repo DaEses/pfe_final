@@ -10,10 +10,12 @@ import numpy as np
 
 from interview_monitor import (
     PhoneDetector,
+    PaperDetector,
     GazeDetector,
     face_cascade,
     predict_face,
     draw_phone_boxes,
+    draw_paper_boxes,
     draw_gaze_eye_icon,
     draw_confidence_bar,
     draw_status_bar,
@@ -21,6 +23,7 @@ from interview_monitor import (
 
 _gaze = None
 _phone = None
+_paper = None
 _stats = None
 
 CALIBRATION_TARGET = 15
@@ -44,20 +47,23 @@ def default_stats():
 
 
 def reset_detectors():
-    global _gaze, _phone, _stats
+    global _gaze, _phone, _paper, _stats
     _stats = default_stats()
     _gaze = GazeDetector()
     _phone = PhoneDetector()
+    _paper = PaperDetector(_phone._model)  # Share YOLO model
 
 
 def ensure_loaded():
-    global _gaze, _phone, _stats
+    global _gaze, _phone, _paper, _stats
     if _stats is None:
         _stats = default_stats()
     if _gaze is None:
         _gaze = GazeDetector()
     if _phone is None:
         _phone = PhoneDetector()
+    if _paper is None:
+        _paper = PaperDetector(_phone._model)
 
 
 def calibrate_step(frame_bgr):
@@ -104,6 +110,11 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
         _stats["lastPhoneAt"] = datetime.utcnow().isoformat()
         alerts.append("PHONE DETECTED")
         draw_phone_boxes(preview, phone_boxes)
+
+    paper_boxes = _paper.process(frame)
+    if paper_boxes:
+        alerts.append("PAPER DETECTED")
+        draw_paper_boxes(preview, paper_boxes)
 
     if not _stats.get("calibrated"):
         calibrate_step(frame)
@@ -173,7 +184,7 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
         direction = gaze_result.get("direction", "").upper()
         alerts.append(f"GAZE AWAY ({direction})")
 
-    draw_status_bar(preview, gaze_result, phone_boxes, emotion_label)
+    draw_status_bar(preview, gaze_result, phone_boxes, paper_boxes, emotion_label)
 
     if write_preview:
         cv2.imwrite(write_preview, preview)

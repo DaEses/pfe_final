@@ -22,7 +22,7 @@ export class JobSeekerAuthService {
   ) {}
 
   async register(registerDto: RegisterJobSeekerDto) {
-    const { email, password, firstName, lastName, phone, bio, skills } =
+    const { email, password, firstName, lastName, phone, bio, skills, location, linkedinProfile, resume } =
       registerDto;
     const normalizedEmail = email.toLowerCase().trim();
 
@@ -42,6 +42,9 @@ export class JobSeekerAuthService {
       phone: phone ?? '',
       bio: bio ?? '',
       skills: skills ?? [],
+      location: location ?? '',
+      linkedinProfile: linkedinProfile ?? '',
+      resume: resume ?? '',
       workExperience: [],
       education: [],
     });

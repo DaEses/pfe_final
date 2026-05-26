@@ -31,12 +31,28 @@ export class AuthService {
     };
   }
 
-  async register(email: string, password: string, companyName: string) {
+  async register(
+    email: string,
+    password: string,
+    companyName: string,
+    companyDescription?: string,
+    phone?: string,
+    recruiterName?: string,
+    companyRole?: string,
+    companyWebsite?: string,
+    companyLogo?: string,
+  ) {
     const normalizedEmail = email.toLowerCase().trim();
     const user = await this.hrUserService.register(
       normalizedEmail,
       password,
       companyName,
+      companyDescription,
+      phone,
+      recruiterName,
+      companyRole,
+      companyWebsite,
+      companyLogo,
     );
     const payload = { sub: user.id, email: user.email };
     return {
@@ -45,6 +61,7 @@ export class AuthService {
         id: user.id,
         email: user.email,
         companyName: user.companyName,
+        recruiterName: user.recruiterName,
       },
     };
   }

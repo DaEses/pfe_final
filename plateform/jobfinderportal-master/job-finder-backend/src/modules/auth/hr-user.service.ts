@@ -15,6 +15,12 @@ export class HRUserService {
     email: string,
     password: string,
     companyName: string,
+    companyDescription?: string,
+    phone?: string,
+    recruiterName?: string,
+    companyRole?: string,
+    companyWebsite?: string,
+    companyLogo?: string,
   ): Promise<HRUser> {
     const normalizedEmail = email.toLowerCase().trim();
     const existingUser = await this.hrUserRepository.findOne({
@@ -30,6 +36,12 @@ export class HRUserService {
       email: normalizedEmail,
       password: hashedPassword,
       companyName,
+      companyDescription: companyDescription ?? '',
+      phone: phone ?? '',
+      recruiterName: recruiterName ?? '',
+      companyRole: companyRole ?? '',
+      companyWebsite: companyWebsite ?? '',
+      companyLogo: companyLogo ?? '',
     });
 
     return this.hrUserRepository.save(hrUser);

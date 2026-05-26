@@ -347,6 +347,7 @@ function CandidateInterview() {
   const isLast = step === answers.length - 1;
   const progress = ((step + 1) / answers.length) * 100;
   const phoneAlert = monitor.phoneDetections > 0;
+  const paperAlert = monitor.paperDetections > 0;
 
   return (
     <div className="candidate-interview">
@@ -481,9 +482,16 @@ function CandidateInterview() {
               <span>Phone</span>
               <strong>{monitor.phoneDetections}</strong>
             </li>
+            <li className={paperAlert ? 'stat-alert' : ''}>
+              <span>Paper</span>
+              <strong>{monitor.paperDetections}</strong>
+            </li>
           </ul>
           {phoneAlert && (
             <p className="monitor-warning">Phone detected — recorded in HR report.</p>
+          )}
+          {paperAlert && (
+            <p className="monitor-warning">Paper/documents detected — recorded in HR report.</p>
           )}
           {!monitor.calibrated && (
             <p className="monitor-note">

@@ -31,6 +31,18 @@ export class RegisterJobSeekerDto {
   @IsOptional()
   @IsArray()
   skills?: string[];
+
+  @IsOptional()
+  @IsString()
+  location?: string;
+
+  @IsOptional()
+  @IsString()
+  linkedinProfile?: string;
+
+  @IsOptional()
+  @IsString()
+  resume?: string;
 }
 
 export class LoginJobSeekerDto {

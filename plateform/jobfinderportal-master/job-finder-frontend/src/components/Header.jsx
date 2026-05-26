@@ -1,57 +1,60 @@
-import { Link } from 'react-router-dom';
+import { Link, useLocation } from 'react-router-dom';
+import { getJobSeekerToken, getHRToken } from '../services/api';
 import '../styles/Header.css';
 
-function Header({ isLoggedIn }) {
+function Header() {
+  const location = useLocation();
+  const isCandidateLoggedIn = Boolean(getJobSeekerToken());
+  const isHRLoggedIn = Boolean(getHRToken());
+
   return (
-    <header>
-      <div className="header-area header-transparrent">
-        <div className="headder-top header-sticky">
-          <div className="container">
-            <div className="row align-items-center">
-              <div className="col-lg-3 col-md-2">
-                <div className="logo">
-                  <Link to="/">
-                    <img src="/assets/img/logo/logo.png" alt="Job Finder Logo" />
-                  </Link>
-                </div>
-              </div>
-              <div className="col-lg-9 col-md-9">
-                <div className="menu-wrapper">
-                  <div className="main-menu">
-                    <nav className="d-none d-lg-block">
-                      <ul id="navigation">
-                        <li><Link to="/">Home</Link></li>
-                        <li><Link to="/">About</Link></li>
-                        <li>
-                          <a href="#">Page</a>
-                          <ul className="submenu">
-                            <li><a href="#">Blog</a></li>
-                            <li><a href="#">Blog Details</a></li>
-                            <li><a href="#">Elements</a></li>
-                            <li><a href="#">Job Details</a></li>
-                          </ul>
-                        </li>
-                        <li><a href="#">Contact</a></li>
-                      </ul>
-                    </nav>
-                  </div>
-                  <div className="header-btn d-none f-right d-lg-block">
-                    {!isLoggedIn ? (
-                      <>
-                        <Link to="/register" className="btn head-btn1">Register</Link>
-                        <Link to="/login" className="btn head-btn2">Login</Link>
-                      </>
-                    ) : (
-                      <Link to="/login" className="btn head-btn2">Logout</Link>
-                    )}
-                  </div>
-                </div>
-              </div>
-              <div className="col-12">
-                <div className="mobile_menu d-block d-lg-none"></div>
-              </div>
-            </div>
-          </div>
+    <header className="site-header">
+      <div className="container header-container">
+        <div className="logo-area">
+          <Link to="/" className="logo-link">
+            <img src="/assets/img/logo/logo.png" alt="Job Finder Logo" className="brand-logo" />
+          </Link>
+        </div>
+
+        <nav className="nav-menu">
+          <ul>
+            <li>
+              <Link to="/" className={location.pathname === '/' ? 'active' : ''}>
+                Home
+              </Link>
+            </li>
+            <li>
+              <Link to="/job-seeker/search" className={location.pathname === '/job-seeker/search' ? 'active' : ''}>
+                Find Jobs
+              </Link>
+            </li>
+            <li>
+              <Link to="/login" className={location.pathname.startsWith('/hr') || location.pathname === '/login' ? 'active' : ''}>
+                HR Portal
+              </Link>
+            </li>
+          </ul>
+        </nav>
+
+        <div className="header-actions">
+          {isCandidateLoggedIn ? (
+            <Link to="/job-seeker/search" className="btn btn-secondary">
+              Candidate Dashboard
+            </Link>
+          ) : isHRLoggedIn ? (
+            <Link to="/hr/dashboard" className="btn btn-primary">
+              HR Dashboard
+            </Link>
+          ) : (
+            <>
+              <Link to="/job-seeker/login" className="btn btn-secondary login-nav-btn">
+                Candidate Login
+              </Link>
+              <Link to="/login" className="btn btn-primary signup-nav-btn">
+                HR Sign In
+              </Link>
+            </>
+          )}
         </div>
       </div>
     </header>

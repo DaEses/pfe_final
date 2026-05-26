@@ -20,6 +20,22 @@ class HRRegisterDto {
   @IsOptional()
   @IsString()
   phone?: string;
+
+  @IsOptional()
+  @IsString()
+  recruiterName?: string;
+
+  @IsOptional()
+  @IsString()
+  companyRole?: string;
+
+  @IsOptional()
+  @IsString()
+  companyWebsite?: string;
+
+  @IsOptional()
+  @IsString()
+  companyLogo?: string;
 }
 
 class HRLoginDto {
@@ -40,6 +56,12 @@ export class AuthController {
       body.email,
       body.password,
       body.companyName,
+      body.companyDescription,
+      body.phone,
+      body.recruiterName,
+      body.companyRole,
+      body.companyWebsite,
+      body.companyLogo,
     );
   }
 

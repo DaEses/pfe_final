@@ -28,6 +28,18 @@ export class HRUser {
   @Column({ nullable: true })
   phone: string;
 
+  @Column({ nullable: true })
+  recruiterName: string;
+
+  @Column({ nullable: true })
+  companyRole: string;
+
+  @Column({ nullable: true })
+  companyWebsite: string;
+
+  @Column({ nullable: true })
+  companyLogo: string;
+
   @CreateDateColumn()
   createdAt: Date;
 

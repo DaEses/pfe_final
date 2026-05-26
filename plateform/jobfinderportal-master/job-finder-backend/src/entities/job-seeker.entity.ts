@@ -35,6 +35,12 @@ export class JobSeeker {
   @Column({ nullable: true })
   profilePicture: string;
 
+  @Column({ nullable: true })
+  location: string;
+
+  @Column({ nullable: true })
+  linkedinProfile: string;
+
   @Column('text', { nullable: true })
   resume: string;
 

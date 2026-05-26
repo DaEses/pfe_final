@@ -1,7 +1,6 @@
 .interview-report {
-  max-width: 800px;
+  max-width: 900px;
   margin: 0 auto;
-  padding: 24px;
 }
 
 .report-header {
@@ -9,67 +8,84 @@
 }
 
 .report-header h1 {
-  font-size: 28px;
-  font-weight: 700;
-  color: #1a1a2e;
-  margin-bottom: 8px;
+  font-size: 2rem;
+  margin-bottom: 6px;
 }
 
 .report-header .candidate-name {
-  font-size: 16px;
-  color: #666;
+  font-size: 1.05rem;
+  color: var(--text-muted);
+  font-weight: 500;
 }
 
 .report-card {
-  background: #fff;
+  background-color: var(--card-bg);
   border-radius: 12px;
   padding: 24px;
-  margin-bottom: 20px;
-  box-shadow: 0 2px 8px rgba(0, 0, 0, 0.06);
-  border: 1px solid #e8ecf0;
+  margin-bottom: 24px;
+  box-shadow: var(--shadow);
+  border: 1px solid var(--border);
 }
 
 .report-card h3 {
-  font-size: 18px;
-  font-weight: 600;
-  color: #1a1a2e;
+  font-size: 1.15rem;
+  font-weight: 700;
+  color: var(--text-h);
   margin-bottom: 16px;
   padding-bottom: 12px;
-  border-bottom: 1px solid #e8ecf0;
+  border-bottom: 1px solid var(--border);
 }
 
 .report-note {
-  font-size: 14px;
-  color: #5c6370;
-  margin-bottom: 16px;
+  font-size: 0.875rem;
+  color: var(--text-muted);
+  margin-bottom: 20px;
   line-height: 1.5;
+  background-color: var(--social-bg);
+  padding: 10px 14px;
+  border-radius: 6px;
 }
 
 .score-card {
   text-align: center;
+  position: relative;
+  overflow: hidden;
+}
+
+.score-card::before {
+  content: '';
+  position: absolute;
+  top: 0;
+  left: 0;
+  right: 0;
+  height: 4px;
+  background: linear-gradient(90deg, var(--primary), var(--accent));
 }
 
 .score-value {
-  font-size: 48px;
+  font-size: 3.5rem;
   font-weight: 800;
-  color: var(--accent, #667eea);
-  margin: 8px 0 0;
+  color: var(--primary);
+  margin: 12px 0 0;
+  line-height: 1.1;
+  letter-spacing: -0.05em;
 }
 
 .recommendation-text {
-  font-size: 15px;
+  font-size: 0.95rem;
   line-height: 1.7;
-  color: #444;
-  background: #f8f9fc;
-  padding: 16px;
+  color: var(--text-h);
+  background-color: var(--primary-light);
+  padding: 20px;
   border-radius: 8px;
-  border-left: 4px solid #667eea;
+  border-left: 4px solid var(--primary);
+  font-weight: 500;
 }
 
 .qa-item {
-  margin-bottom: 20px;
-  padding-bottom: 20px;
-  border-bottom: 1px solid #f0f0f0;
+  margin-bottom: 24px;
+  padding-bottom: 24px;
+  border-bottom: 1px solid var(--border);
 }
 
 .qa-item:last-child {
@@ -79,58 +95,91 @@
 }
 
 .qa-question {
-  font-weight: 600;
-  color: #1a1a2e;
+  font-weight: 700;
+  color: var(--text-h);
   margin-bottom: 8px;
-  font-size: 14px;
+  font-size: 0.9rem;
 }
 
 .qa-answer {
-  color: #555;
-  font-size: 14px;
+  color: var(--text);
+  font-size: 0.875rem;
   line-height: 1.6;
-  padding-left: 12px;
-  border-left: 2px solid #e8ecf0;
+  padding: 12px 16px;
+  background-color: var(--social-bg);
+  border-radius: 8px;
+  border-left: 3px solid var(--border);
 }
 
 .emotion-grid {
   display: grid;
-  grid-template-columns: repeat(auto-fit, minmax(160px, 1fr));
-  gap: 12px;
+  grid-template-columns: repeat(auto-fit, minmax(180px, 1fr));
+  gap: 16px;
 }
 
 .emotion-stat {
-  background: #f8f9fc;
+  background-color: var(--social-bg);
+  border: 1px solid var(--border);
   border-radius: 8px;
-  padding: 12px 16px;
+  padding: 16px;
   text-align: center;
+  display: flex;
+  flex-direction: column;
+  justify-content: center;
+  min-height: 90px;
 }
 
 .emotion-stat-label {
-  font-size: 12px;
-  color: #888;
+  font-size: 0.7rem;
+  color: var(--text-muted);
   text-transform: uppercase;
-  letter-spacing: 0.5px;
-  margin-bottom: 4px;
+  letter-spacing: 0.05em;
+  font-weight: 700;
+  margin-bottom: 6px;
 }
 
 .emotion-stat-value {
-  font-size: 20px;
+  font-size: 1.25rem;
+  font-weight: 800;
+  color: var(--text-h);
+  line-height: 1.2;
+}
+
+.risk-high {
+  color: var(--danger) !important;
   font-weight: 700;
-  color: #1a1a2e;
 }
 
-.risk-high { color: #e53e3e; }
-.risk-medium { color: #dd6b20; }
-.risk-low { color: #38a169; }
-
-.interview-report .loading,
-.interview-report .error-message {
-  padding: 40px;
-  text-align: center;
-  font-size: 16px;
+.risk-medium {
+  color: var(--warning) !important;
+  font-weight: 700;
 }
 
-.interview-report .error-message {
-  color: #e53e3e;
+.risk-low {
+  color: var(--success) !important;
+  font-weight: 700;
+}
+
+@media (max-width: 576px) {
+  .report-header h1 {
+    font-size: 1.75rem;
+  }
+
+  .report-card {
+    padding: 16px;
+  }
+
+  .emotion-grid {
+    grid-template-columns: 1fr 1fr;
+    gap: 10px;
+  }
+
+  .emotion-stat {
+    padding: 10px;
+    min-height: 80px;
+  }
+
+  .emotion-stat-value {
+    font-size: 1.1rem;
+  }
 }

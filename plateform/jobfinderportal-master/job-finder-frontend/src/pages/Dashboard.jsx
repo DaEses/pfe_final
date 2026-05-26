@@ -127,7 +127,9 @@ function Dashboard() {
                         </p>
                       </div>
                       <div className="app-status">
-                        <span className="badge">{job.status}</span>
+                        <span className={`badge ${job.status === 'active' ? 'badge-success' : 'badge-danger'}`}>
+                          {job.status}
+                        </span>
                       </div>
                     </div>
                   ))}

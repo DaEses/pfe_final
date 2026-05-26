@@ -46,6 +46,7 @@ function JobSearch() {
   });
   const [selectedJob, setSelectedJob] = useState(null);
   const [coverLetter, setCoverLetter] = useState('');
+  const [resumeText, setResumeText] = useState('');
   const [showApplyModal, setShowApplyModal] = useState(false);
   const [savedJobs, setSavedJobs] = useState([]);
   const [activeTab, setActiveTab] = useState('jobs');
@@ -146,17 +147,43 @@ function JobSearch() {
     setShowApplyModal(true);
   };
 
+  const handleResumeUpload = async (e) => {
+    const file = e.target.files?.[0];
+    if (!file) return;
+
+    const reader = new FileReader();
+    reader.onload = (event) => {
+      const text = event.target?.result;
+      if (typeof text === 'string') {
+        setResumeText(text);
+      }
+    };
+    reader.onerror = () => {
+      alert('Failed to read file');
+    };
+    reader.readAsText(file);
+  };
+
   const handleApplySubmit = async () => {
+    if (!resumeText.trim()) {
+      alert('Please upload your resume/CV to apply');
+      return;
+    }
     try {
       const { ok, data } = await apiRequest('/job-applications', {
         method: 'POST',
         token,
-        body: { jobPostingId: selectedJob.id, coverLetter },
+        body: { 
+          jobPostingId: selectedJob.id, 
+          coverLetter,
+          applicantResume: resumeText,
+        },
       });
       if (ok && data?.success !== false) {
         alert('Application submitted successfully!');
         setShowApplyModal(false);
         setCoverLetter('');
+        setResumeText('');
         setSelectedJob(null);
         fetchMyApplications();
       } else {
@@ -389,8 +416,25 @@ function JobSearch() {
 
             <div className="apply-form">
               <div className="form-group">
-                <label>Cover Letter (Optional)</label>
+                <label htmlFor="resume">Resume/CV * (Required)</label>
+                <input
+                  id="resume"
+                  type="file"
+                  accept=".txt,.pdf,.doc,.docx"
+                  onChange={handleResumeUpload}
+                  required
+                />
+                {resumeText && (
+                  <p style={{ fontSize: '12px', color: '#666', marginTop: '5px' }}>
+                    ✓ Resume uploaded ({Math.round(resumeText.length / 1024)} KB)
+                  </p>
+                )}
+              </div>
+
+              <div className="form-group">
+                <label htmlFor="cover-letter">Cover Letter (Optional)</label>
                 <textarea
+                  id="cover-letter"
                   value={coverLetter}
                   onChange={(e) => setCoverLetter(e.target.value)}
                   placeholder="Tell the employer why you're interested..."

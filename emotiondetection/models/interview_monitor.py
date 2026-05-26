@@ -43,6 +43,7 @@ COLOR_IRRITATED = (50,  50, 220)
 COLOR_GAZE_OK   = (220, 180,  50)
 COLOR_GAZE_BAD  = (30,  30, 255)
 COLOR_PHONE     = (255,  50, 220)
+COLOR_PAPER     = (0, 165, 255)
 FONT            = cv2.FONT_HERSHEY_SIMPLEX
 
 
@@ -89,11 +90,12 @@ class GazeDetector:
     L_EYE_TOP    = 159
     L_EYE_BOT    = 145
 
-    LEFT_THR  = 0.38
-    RIGHT_THR = 0.62
-    UP_THR    = 0.35
+    LEFT_THR  = 0.25   # Even looser for better sensitivity
+    RIGHT_THR = 0.75   # Even looser for better sensitivity
+    UP_THR    = 0.20   # Even looser for better sensitivity
     ALERT_SEC = 2.0
     COOLDOWN  = 5.0
+    GAZE_SKIP = 2      # Process gaze every 2 frames
 
     def __init__(self):
         import mediapipe as mp
@@ -124,6 +126,8 @@ class GazeDetector:
         self.calibrated  = False
         self._off_start  = None
         self._last_alert = 0.0
+        self._frame_n    = 0
+        self._last_gaze  = {'direction': 'center', 'h_ratio': None, 'v_ratio': None, 'alert': False}
 
     def _pt(self, lm, idx, w, h):
         p = lm[idx]
@@ -158,16 +162,22 @@ class GazeDetector:
 
     def calibrate(self, cap, display=True):
         print("\n[Gaze calibration] Look straight at the camera for 5 s ...")
+        print("[Press SPACE to skip calibration, ESC to abort]")
         hs, vs, t0 = [], [], time.time()
+        frame_skip = 0
 
         while time.time() - t0 < 5.0:
             ok, frame = cap.read()
             if not ok:
                 break
-            lm, w_px, h_px = self._detect(frame)
-            if lm is not None:
-                h, v = self._ratios(lm, w_px, h_px)
-                hs.append(h); vs.append(v)
+            
+            # Only detect every 5 frames to speed up calibration
+            frame_skip += 1
+            if frame_skip % 5 == 0:
+                lm, w_px, h_px = self._detect(frame)
+                if lm is not None:
+                    h, v = self._ratios(lm, w_px, h_px)
+                    hs.append(h); vs.append(v)
 
             if display:
                 rem = max(0, 5 - int(time.time() - t0))
@@ -175,7 +185,13 @@ class GazeDetector:
                 cv2.putText(f2, f"CALIBRATING — look at camera ({rem}s)",
                             (30, frame.shape[0] // 2), FONT, 0.9, (0, 220, 255), 2)
                 cv2.imshow('Interview Monitor', f2)
-                cv2.waitKey(1)
+                key = cv2.waitKey(1) & 0xFF
+                if key == 32:  # SPACE key - skip calibration
+                    print("[Gaze calibration] Skipped by user.")
+                    return
+                elif key == 27:  # ESC key - abort
+                    print("[Gaze calibration] Aborted by user.")
+                    return
 
         if hs:
             self._h_off     = np.mean(hs) - 0.5
@@ -186,14 +202,23 @@ class GazeDetector:
             print("[Gaze calibration] No face found — using defaults.\n")
 
     def process(self, frame_bgr):
+        self._frame_n += 1
+        if self._frame_n % self.GAZE_SKIP != 0:
+            return self._last_gaze
+
         lm, w_px, h_px = self._detect(frame_bgr)
 
         if lm is None:
-            return {'direction': 'no_face', 'h_ratio': None, 'v_ratio': None, 'alert': False}
+            self._last_gaze = {'direction': 'no_face', 'h_ratio': None, 'v_ratio': None, 'alert': False}
+            return self._last_gaze
 
         h, v = self._ratios(lm, w_px, h_px)
+        h_raw, v_raw = h, v  # Store raw values for debug
         h   -= self._h_off
         v   -= self._v_off
+
+        # Debug: uncomment to see actual measurements
+        # print(f"[GAZE] raw h={h_raw:.3f}, v={v_raw:.3f} | calibrated h={h:.3f}, v={v:.3f} | thresholds: L={self.LEFT_THR}, R={self.RIGHT_THR}, U={self.UP_THR}")
 
         if v < self.UP_THR:
             direction = 'up'
@@ -217,7 +242,8 @@ class GazeDetector:
         else:
             self._off_start = None
 
-        return {'direction': direction, 'h_ratio': h, 'v_ratio': v, 'alert': alert}
+        self._last_gaze = {'direction': direction, 'h_ratio': h, 'v_ratio': v, 'alert': alert}
+        return self._last_gaze
 
 
 # ──────────────────────────────────────────────────────────
@@ -227,7 +253,7 @@ class GazeDetector:
 class PhoneDetector:
     PHONE_CLASS = 67
     CONF_THR    = 0.40
-    SKIP        = 3
+    SKIP        = 6
 
     def __init__(self):
         from ultralytics import YOLO
@@ -241,12 +267,57 @@ class PhoneDetector:
         if self._frame_n % self.SKIP != 0:
             return self._last
 
-        results = self._model(frame_bgr, verbose=False, classes=[self.PHONE_CLASS])[0]
+        # Resize for faster inference
+        h, w = frame_bgr.shape[:2]
+        frame_resized = cv2.resize(frame_bgr, (w // 2, h // 2))
+        results = self._model(frame_resized, verbose=False, classes=[self.PHONE_CLASS])[0]
         boxes   = []
         for box in results.boxes:
             conf = float(box.conf[0])
             if conf >= self.CONF_THR:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
+                # Scale back to original resolution
+                x1, y1, x2, y2 = x1 * 2, y1 * 2, x2 * 2, y2 * 2
+                boxes.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'conf': conf})
+        self._last = boxes
+        return boxes
+
+
+# ──────────────────────────────────────────────────────────
+#  4B. PAPER DETECTION
+# ──────────────────────────────────────────────────────────
+
+class PaperDetector:
+    BOOK_CLASS  = 73   # "book" class in COCO dataset
+    CONF_THR    = 0.35
+    SKIP        = 6
+
+    def __init__(self, yolo_model=None):
+        from ultralytics import YOLO
+        if yolo_model is None:
+            print("Loading YOLOv8n for paper detection...")
+            self._model = YOLO('yolov8n.pt')
+        else:
+            self._model = yolo_model
+        self._frame_n = 0
+        self._last    = []
+
+    def process(self, frame_bgr):
+        self._frame_n += 1
+        if self._frame_n % self.SKIP != 0:
+            return self._last
+
+        # Resize for faster inference
+        h, w = frame_bgr.shape[:2]
+        frame_resized = cv2.resize(frame_bgr, (w // 2, h // 2))
+        results = self._model(frame_resized, verbose=False, classes=[self.BOOK_CLASS])[0]
+        boxes   = []
+        for box in results.boxes:
+            conf = float(box.conf[0])
+            if conf >= self.CONF_THR:
+                x1, y1, x2, y2 = map(int, box.xyxy[0])
+                # Scale back to original resolution
+                x1, y1, x2, y2 = x1 * 2, y1 * 2, x2 * 2, y2 * 2
                 boxes.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'conf': conf})
         self._last = boxes
         return boxes
@@ -285,10 +356,23 @@ def draw_phone_boxes(frame, phone_boxes):
                     FONT, 0.7, (255, 255, 255), 2)
 
 
-def draw_status_bar(frame, gaze, phone_boxes, emotion_label):
+def draw_paper_boxes(frame, paper_boxes):
+    for b in paper_boxes:
+        cv2.rectangle(frame, (b['x1'], b['y1']), (b['x2'], b['y2']), COLOR_PAPER, 3)
+        label = f"PAPER {b['conf']*100:.0f}%"
+        (tw, th), _ = cv2.getTextSize(label, FONT, 0.7, 2)
+        cv2.rectangle(frame,
+                      (b['x1'], b['y1'] - th - 10),
+                      (b['x1'] + tw + 10, b['y1']),
+                      COLOR_PAPER, -1)
+        cv2.putText(frame, label, (b['x1'] + 5, b['y1'] - 5),
+                    FONT, 0.7, (255, 255, 255), 2)
+
+
+def draw_status_bar(frame, gaze, phone_boxes, paper_boxes, emotion_label):
     h, w = frame.shape[:2]
     ov   = frame.copy()
-    cv2.rectangle(ov, (0, 0), (w, 96), (18, 18, 18), -1)
+    cv2.rectangle(ov, (0, 0), (w, 140), (18, 18, 18), -1)
     cv2.addWeighted(ov, 0.6, frame, 0.4, 0, frame)
 
     em_col = COLOR_NEUTRAL if emotion_label == 'NEUTRAL' else COLOR_IRRITATED
@@ -305,18 +389,31 @@ def draw_status_bar(frame, gaze, phone_boxes, emotion_label):
     (tw, _), _ = cv2.getTextSize(p_lbl, FONT, 0.65, 2)
     cv2.putText(frame, p_lbl, (w - tw - 14, 34), FONT, 0.65, p_col, 2)
 
+    # Paper detection status
+    paper_col = COLOR_PAPER if paper_boxes else (80, 200, 80)
+    paper_lbl = "PAPER: YES !!" if paper_boxes else "PAPER: none"
+    (tw, _), _ = cv2.getTextSize(paper_lbl, FONT, 0.65, 2)
+    cv2.putText(frame, paper_lbl, (w - tw - 14, 58), FONT, 0.65, paper_col, 2)
+
+    # Debug: show raw gaze ratios
+    if gaze['h_ratio'] is not None:
+        debug_text = f"h={gaze['h_ratio']:.2f} v={gaze['v_ratio']:.2f}"
+        cv2.putText(frame, debug_text, (14, 80), FONT, 0.45, (150, 150, 255), 1)
+
     alerts = []
     if gaze['alert']:
         alerts.append(f"GAZE AWAY ({gdir})")
     if phone_boxes:
         alerts.append("PHONE DETECTED")
+    if paper_boxes:
+        alerts.append("PAPER DETECTED")
     if emotion_label == 'IRRITATED':
         alerts.append("IRRITATED")
 
     if alerts:
         banner = "  |  ".join(alerts)
-        cv2.rectangle(frame, (0, 55), (w, 90), (0, 0, 160), -1)
-        cv2.putText(frame, f"!! {banner}", (14, 78), FONT, 0.55, (255, 220, 60), 2)
+        cv2.rectangle(frame, (0, 95), (w, 135), (0, 0, 160), -1)
+        cv2.putText(frame, f"!! {banner}", (14, 122), FONT, 0.55, (255, 220, 60), 2)
 
 
 # ──────────────────────────────────────────────────────────
@@ -326,6 +423,7 @@ def draw_status_bar(frame, gaze, phone_boxes, emotion_label):
 def main():
     gaze_det  = GazeDetector()
     phone_det = PhoneDetector()
+    paper_det = PaperDetector(phone_det._model)  # Share YOLO model for efficiency
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -335,7 +433,13 @@ def main():
 
     last_gaze    = {'direction': 'center', 'h_ratio': None, 'v_ratio': None, 'alert': False}
     last_phones  = []
+    last_papers  = []
     last_emotion = 'NEUTRAL'
+    
+    # FPS monitoring
+    frame_count = 0
+    fps_timer = time.time()
+    current_fps = 0
 
     print("Interview monitor running — Q to quit, C to re-calibrate")
 
@@ -343,6 +447,14 @@ def main():
         ret, frame = cap.read()
         if not ret:
             break
+        
+        # FPS monitoring
+        frame_count += 1
+        elapsed = time.time() - fps_timer
+        if elapsed >= 1.0:
+            current_fps = frame_count / elapsed
+            frame_count = 0
+            fps_timer = time.time()
 
         gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
 
@@ -375,14 +487,21 @@ def main():
         last_phones = phone_det.process(frame)
         draw_phone_boxes(frame, last_phones)
 
-        # (d) Your original legend
+        # (d) Paper
+        last_papers = paper_det.process(frame)
+        draw_paper_boxes(frame, last_papers)
+
+        # (e) Your original legend
         fh = frame.shape[0]
         cv2.putText(frame, "[GREEN] NEUTRAL",  (10, fh - 40), FONT, 0.55, COLOR_NEUTRAL,   2)
         cv2.putText(frame, "[RED] IRRITATED",  (10, fh - 18), FONT, 0.55, COLOR_IRRITATED, 2)
 
-        # (e) New overlays
-        draw_status_bar(frame, last_gaze, last_phones, last_emotion)
+        # (f) New overlays
+        draw_status_bar(frame, last_gaze, last_phones, last_papers, last_emotion)
         draw_gaze_eye_icon(frame, last_gaze)
+        
+        # Display FPS
+        cv2.putText(frame, f"FPS: {current_fps:.1f}", (frame.shape[1] - 150, 25), FONT, 0.6, (0, 255, 0), 2)
 
         cv2.imshow('Interview Monitor — Q quit | C calibrate', frame)
 
