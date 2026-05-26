@@ -164,10 +164,14 @@ export class InterviewService {
     args: string[],
     outputPath: string,
     fallback: Record<string, unknown>,
+    timeoutMs = 300_000,
   ): Promise<void> {
     try {
       this.logger.log(`[EXEC] Running: ${python} ${args.join(' ')}`);
-      await execFileAsync(python, args, { timeout: 300_000, maxBuffer: 10 * 1024 * 1024 });
+      await execFileAsync(python, args, {
+        timeout: timeoutMs,
+        maxBuffer: 10 * 1024 * 1024,
+      });
       if (!fs.existsSync(outputPath)) {
         this.logger.error(`[EXEC] Output file not created: ${outputPath}`);
         throw new Error('Python script did not create output file');
@@ -199,6 +203,206 @@ export class InterviewService {
       'Describe a challenge you solved with your team.',
       'Why do you want to join this company?',
     ];
+  }
+
+  private buildFallbackNextTurn(jobRole: string, qaPairs: Array<{ question: string; answer: string }>) {
+    const fallbackQuestions = this.buildInterviewQuestions(jobRole);
+    const nextIndex = qaPairs.length;
+
+    if (nextIndex >= fallbackQuestions.length) {
+      return {
+        done: true,
+        nextQuestion: null,
+        questionNumber: nextIndex + 1,
+        uiMessage: 'Interview complete. Thank you for your time.',
+      };
+    }
+
+    const q = fallbackQuestions[nextIndex];
+    return {
+      done: false,
+      nextQuestion: q,
+      questionNumber: nextIndex + 1,
+      uiMessage: q,
+    };
+  }
+
+  private async materializeCandidateResumeFile(
+    application: Application,
+    artifactsDir: string,
+    interviewId: string,
+  ): Promise<string> {
+    const rawResume = application.applicantResume;
+    if (!rawResume || !rawResume.trim()) return '';
+
+    fs.mkdirSync(artifactsDir, { recursive: true });
+
+    // If we receive a data URL (front-end stores PDFs as base64), write it to a file.
+    if (rawResume.startsWith('data:') && rawResume.includes(';base64,')) {
+      const mime = rawResume.slice('data:'.length, rawResume.indexOf(';base64,')).trim();
+      const base64 = rawResume.split(';base64,')[1];
+      const ext = mime.includes('pdf')
+        ? '.pdf'
+        : mime.includes('word') || mime.includes('officedocument')
+          ? '.doc'
+          : '.bin';
+
+      const resumePath = path.join(artifactsDir, `resume_${interviewId}${ext}`);
+      fs.writeFileSync(resumePath, Buffer.from(base64, 'base64'));
+      return resumePath;
+    }
+
+    // Otherwise treat it as plain text resume content.
+    const resumePath = path.join(artifactsDir, `resume_${interviewId}.txt`);
+    fs.writeFileSync(resumePath, rawResume, 'utf8');
+    return resumePath;
+  }
+
+  private getChatbotPythonExecutable(): string {
+    const projectRoot = this.getProjectRoot();
+    const chatbotDir = path.join(projectRoot, 'chatbot');
+    return this.resolvePythonExecutable(path.join(chatbotDir, '.venv'));
+  }
+
+  private getChatbotScriptPath(): string {
+    const projectRoot = this.getProjectRoot();
+    const chatbotDir = path.join(projectRoot, 'chatbot');
+    return path.join(chatbotDir, 'hr_interview.py');
+  }
+
+  private async generateCandidateChatbotTurn(
+    jobRole: string,
+    application: Application,
+    interviewId: string,
+    qaPairs: Array<{ question: string; answer: string }>,
+    timeoutMs: number,
+  ): Promise<{
+    done: boolean;
+    nextQuestion: string | null;
+    questionNumber?: number;
+    uiMessage?: string;
+  }> {
+    const projectRoot = this.getProjectRoot();
+    const artifactsDir = path.join(projectRoot, '.runtime', 'interviews');
+    fs.mkdirSync(artifactsDir, { recursive: true });
+
+    const chatbotPython = this.getChatbotPythonExecutable();
+    const chatbotScript = this.getChatbotScriptPath();
+
+    const conversationPath = path.join(
+      artifactsDir,
+      `chatbot_conversation_${interviewId}.json`,
+    );
+    fs.writeFileSync(
+      conversationPath,
+      JSON.stringify({ jobRole, questionsAnswers: qaPairs }, null, 2),
+      'utf8',
+    );
+
+    const resumePath = await this.materializeCandidateResumeFile(
+      application,
+      artifactsDir,
+      interviewId,
+    );
+
+    const outputPath = path.join(
+      artifactsDir,
+      `chatbot_turn_${interviewId}_${Date.now()}.json`,
+    );
+
+    const fallback = this.buildFallbackNextTurn(jobRole, qaPairs);
+
+    const args = [
+      chatbotScript,
+      '--mode',
+      'next',
+      '--job-role',
+      jobRole,
+      '--conversation',
+      conversationPath,
+      ...(resumePath ? ['--resume', resumePath] : []),
+      '--output',
+      outputPath,
+    ];
+
+    await this.execPythonSafe(
+      chatbotPython,
+      args,
+      outputPath,
+      fallback,
+      timeoutMs,
+    );
+
+    const raw = fs.readFileSync(outputPath, 'utf8');
+    const parsed = JSON.parse(raw) as {
+      done: boolean;
+      nextQuestion: string | null;
+      questionNumber?: number;
+      uiMessage?: string;
+    };
+
+    return parsed;
+  }
+
+  private async ensureCandidateChatbotState(
+    interview: Interview,
+    application: Application,
+    jobRole: string,
+  ): Promise<NonNullable<Interview['chatbotState']>> {
+    const existing = interview.chatbotState;
+
+    if (existing?.questionsAnswers && existing.questionsAnswers.length > 0) {
+      // Basic sanity: ensure there's always at least one pending question.
+      if (!existing.done) {
+        const hasPending = existing.questionsAnswers.some(
+          (qa) => !(qa.answer || '').trim(),
+        );
+        if (!hasPending) {
+          // If we somehow ended up without a pending question, generate one.
+          const next = await this.generateCandidateChatbotTurn(
+            jobRole,
+            application,
+            interview.id,
+            existing.questionsAnswers,
+            90_000,
+          );
+          if (!next.done && next.nextQuestion) {
+            existing.questionsAnswers.push({ question: next.nextQuestion, answer: '' });
+            existing.lastBotMessage = next.uiMessage ?? next.nextQuestion;
+          } else {
+            existing.done = true;
+            existing.lastBotMessage = next.uiMessage ?? 'Interview complete.';
+          }
+          interview.chatbotState = existing;
+          await this.interviewRepository.save(interview);
+        }
+      }
+      return existing as NonNullable<Interview['chatbotState']>;
+    }
+
+    const firstTurn = await this.generateCandidateChatbotTurn(
+      jobRole,
+      application,
+      interview.id,
+      [],
+      90_000,
+    );
+
+    const firstQuestion =
+      !firstTurn.done && firstTurn.nextQuestion ? firstTurn.nextQuestion : null;
+
+    const questionsAnswers: Array<{ question: string; answer: string }> =
+      firstQuestion ? [{ question: firstQuestion, answer: '' }] : [];
+
+    interview.chatbotState = {
+      questionsAnswers,
+      done: Boolean(firstTurn.done),
+      lastBotMessage: firstTurn.uiMessage ?? firstQuestion ?? '',
+    };
+
+    await this.interviewRepository.save(interview);
+
+    return interview.chatbotState;
   }
 
   private scoreWrittenAnswers(
@@ -611,18 +815,125 @@ export class InterviewService {
     await this.initEmotionSession(interview.id);
 
     const jobTitle = application.jobPosting?.title ?? 'this position';
+
+    const chatbotState = await this.ensureCandidateChatbotState(
+      interview,
+      application,
+      jobTitle,
+    );
+    const currentQuestionIndex =
+      chatbotState.questionsAnswers.findIndex(
+        (qa) => !(qa.answer || '').trim(),
+      ) ?? 0;
+    const isComplete = Boolean(chatbotState.done);
+
     return {
       interviewId: interview.id,
       candidateName: application.applicantName,
       jobTitle,
-      questions: this.buildInterviewQuestions(jobTitle),
+      questionsAnswers: chatbotState.questionsAnswers,
+      currentQuestionIndex: Math.max(0, currentQuestionIndex),
+      isComplete,
+      lastBotMessage: chatbotState.lastBotMessage ?? '',
+    };
+  }
+
+  async submitCandidateAnswerAndGetNextQuestion(
+    interviewId: string,
+    applicantEmail: string,
+    answer: string,
+  ): Promise<{
+    done: boolean;
+    nextQuestion?: string | null;
+    uiMessage?: string;
+    questionsAnswers: Array<{ question: string; answer: string }>;
+    interviewId: string;
+  }> {
+    const interview = await this.interviewRepository.findOne({
+      where: { id: interviewId },
+      relations: ['application', 'application.jobPosting'],
+    });
+
+    if (!interview) {
+      throw new NotFoundException('Interview not found');
+    }
+    if (interview.application.applicantEmail !== applicantEmail) {
+      throw new BadRequestException('Unauthorized candidate');
+    }
+
+    const application = interview.application;
+    const jobTitle = application.jobPosting?.title ?? 'this position';
+
+    const chatbotState = await this.ensureCandidateChatbotState(
+      interview,
+      application,
+      jobTitle,
+    );
+
+    if (chatbotState.done) {
+      return {
+        done: true,
+        uiMessage: chatbotState.lastBotMessage ?? 'Interview complete.',
+        questionsAnswers: chatbotState.questionsAnswers,
+        interviewId,
+      };
+    }
+
+    const normalizedAnswer = (answer || '').trim();
+    if (!normalizedAnswer) {
+      throw new BadRequestException('Answer cannot be empty');
+    }
+
+    const pendingIndex = chatbotState.questionsAnswers.findIndex(
+      (qa) => !(qa.answer || '').trim(),
+    );
+    if (pendingIndex === -1) {
+      throw new BadRequestException('No pending question found');
+    }
+
+    chatbotState.questionsAnswers[pendingIndex] = {
+      ...chatbotState.questionsAnswers[pendingIndex],
+      answer: normalizedAnswer,
+    };
+
+    interview.chatbotState = chatbotState;
+
+    const nextTurn = await this.generateCandidateChatbotTurn(
+      jobTitle,
+      application,
+      interviewId,
+      chatbotState.questionsAnswers,
+      90_000,
+    );
+
+    if (nextTurn.done || !nextTurn.nextQuestion) {
+      chatbotState.done = true;
+      chatbotState.lastBotMessage =
+        nextTurn.uiMessage ?? 'Interview complete. Thank you for your time.';
+    } else {
+      chatbotState.questionsAnswers.push({
+        question: nextTurn.nextQuestion,
+        answer: '',
+      });
+      chatbotState.lastBotMessage = nextTurn.uiMessage ?? nextTurn.nextQuestion;
+    }
+
+    interview.chatbotState = chatbotState;
+    await this.interviewRepository.save(interview);
+
+    return {
+      done: Boolean(chatbotState.done),
+      nextQuestion: nextTurn.done ? null : nextTurn.nextQuestion,
+      uiMessage: chatbotState.lastBotMessage,
+      questionsAnswers: chatbotState.questionsAnswers,
+      interviewId,
     };
   }
 
   async finishCandidateSession(
     interviewId: string,
     applicantEmail: string,
-    questionsAnswers: Array<{ question: string; answer: string }>,
+    questionsAnswers?: Array<{ question: string; answer: string }>,
   ) {
     const interview = await this.interviewRepository.findOne({
       where: { id: interviewId },
@@ -636,10 +947,22 @@ export class InterviewService {
     }
 
     const application = interview.application;
-    const emotionJson = await this.resolveEmotionSummary(interview);
-    const score = this.computeOverallScore(questionsAnswers, emotionJson);
 
-    const answerPreview = questionsAnswers
+    const finalQuestionsAnswers =
+      questionsAnswers ??
+      interview.chatbotState?.questionsAnswers ??
+      [];
+
+    if (!finalQuestionsAnswers.length) {
+      throw new BadRequestException(
+        'No interview answers found to finalize.',
+      );
+    }
+
+    const emotionJson = await this.resolveEmotionSummary(interview);
+    const score = this.computeOverallScore(finalQuestionsAnswers, emotionJson);
+
+    const answerPreview = finalQuestionsAnswers
       .map((qa, i) => `Q${i + 1}: ${(qa.answer || '').slice(0, 80)}`)
       .join(' | ');
 
@@ -674,13 +997,13 @@ export class InterviewService {
         interviewId: interview.id,
         applicationId: application.id,
         candidateName: application.applicantName,
-        questionsAnswers,
+        questionsAnswers: finalQuestionsAnswers,
         emotionSummary: { ...emotionJson, overallScore: score },
         finalDecisionHints: recommendation,
         rawArtifacts: { emotionSource: emotionJson.source ?? 'unknown' },
       });
     } else {
-      report.questionsAnswers = questionsAnswers;
+      report.questionsAnswers = finalQuestionsAnswers;
       report.emotionSummary = { ...emotionJson, overallScore: score };
       report.finalDecisionHints = recommendation;
       report.rawArtifacts = { emotionSource: emotionJson.source ?? 'unknown' };
@@ -860,19 +1183,17 @@ export class InterviewService {
       Math.max(10, Math.min(90, (interview.duration ?? 30) * 2)),
     );
 
-    // Create a temporary resume file if provided
+    // Create a temporary resume file if provided (supports base64 data URLs).
     let resumePath = '';
-    if (application.applicantResume) {
-      resumePath = path.join(
+    try {
+      resumePath = await this.materializeCandidateResumeFile(
+        application,
         artifactsDir,
-        `resume_${interview.id}.txt`,
+        interview.id,
       );
-      try {
-        fs.writeFileSync(resumePath, application.applicantResume, 'utf8');
-      } catch (e) {
-        this.logger.warn(`Failed to write resume file: ${e}`);
-        resumePath = '';
-      }
+    } catch (e) {
+      this.logger.warn(`Failed to materialize resume file: ${e}`);
+      resumePath = '';
     }
 
     await this.execPythonSafe(
@@ -1011,6 +1332,7 @@ export class InterviewService {
     await this.findOne(id, hrUserId);
     const report = await this.reportRepository.findOne({
       where: { interviewId: id },
+      relations: ['application'],
     });
     if (!report) {
       throw new NotFoundException('Interview report not found');

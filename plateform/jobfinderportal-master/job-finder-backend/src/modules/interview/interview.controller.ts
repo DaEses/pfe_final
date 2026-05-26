@@ -77,14 +77,28 @@ export class InterviewController {
   @UseGuards(JobSeekerJwtAuthGuard)
   finishCandidateSession(
     @Param('interviewId') interviewId: string,
-    @Body('questionsAnswers')
-    questionsAnswers: Array<{ question: string; answer: string }>,
     @Req() req: AuthenticatedJobSeekerRequest,
+    @Body('questionsAnswers')
+    questionsAnswers?: Array<{ question: string; answer: string }>,
   ) {
     return this.interviewService.finishCandidateSession(
       interviewId,
       req.user.email,
       questionsAnswers,
+    );
+  }
+
+  @Post('candidate/:interviewId/answer')
+  @UseGuards(JobSeekerJwtAuthGuard)
+  submitCandidateAnswer(
+    @Param('interviewId') interviewId: string,
+    @Body('answer') answer: string,
+    @Req() req: AuthenticatedJobSeekerRequest,
+  ) {
+    return this.interviewService.submitCandidateAnswerAndGetNextQuestion(
+      interviewId,
+      req.user.email,
+      answer,
     );
   }
 

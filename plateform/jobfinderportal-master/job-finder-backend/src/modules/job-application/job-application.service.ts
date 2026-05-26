@@ -37,6 +37,7 @@ export class JobApplicationService {
       jobSeekerId,
       jobPostingId,
       coverLetter,
+      applicantResume: applicantResume || null,
       status: 'applied',
     });
 
@@ -48,6 +49,11 @@ export class JobApplicationService {
     });
 
     if (seeker) {
+      if (applicantResume && applicantResume.trim()) {
+        seeker.resume = applicantResume;
+        await this.jobSeekerRepository.save(seeker);
+      }
+
       const existingHRApp = await this.applicationRepository.findOne({
         where: { applicantEmail: seeker.email, jobPostingId },
       });
@@ -71,6 +77,16 @@ export class JobApplicationService {
           jobPosting.applicantCount += 1;
           await this.jobPostingRepository.save(jobPosting);
         }
+      } else if (
+        applicantResume &&
+        applicantResume.trim() &&
+        (!existingHRApp.applicantResume || !existingHRApp.applicantResume.trim())
+      ) {
+        existingHRApp.applicantResume = applicantResume;
+        if (coverLetter && coverLetter.trim() && !existingHRApp.coverLetter) {
+          existingHRApp.coverLetter = coverLetter;
+        }
+        await this.applicationRepository.save(existingHRApp);
       }
     }
 
@@ -92,12 +108,23 @@ export class JobApplicationService {
         where: { applicantEmail: seeker.email, jobPostingId },
       });
 
-      if (existing) continue;
+      if (existing) {
+        if (
+          jobApp.applicantResume &&
+          jobApp.applicantResume.trim() &&
+          (!existing.applicantResume || !existing.applicantResume.trim())
+        ) {
+          existing.applicantResume = jobApp.applicantResume;
+          await this.applicationRepository.save(existing);
+        }
+        continue;
+      }
 
       const hrApp = this.applicationRepository.create({
         applicantName: `${seeker.firstName} ${seeker.lastName}`.trim(),
         applicantEmail: seeker.email,
         applicantPhone: seeker.phone || '',
+        applicantResume: jobApp.applicantResume || '',
         jobPostingId,
         coverLetter: jobApp.coverLetter || undefined,
         status:

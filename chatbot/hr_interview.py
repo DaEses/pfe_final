@@ -88,7 +88,7 @@ def extract_resume_text(pdf_path):
     }
 
     try:
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=60)
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=20)
         resp.raise_for_status()
         structured = resp.json()["message"]["content"].strip()
         return structured
@@ -340,11 +340,10 @@ def trim_silence_edges(audio_data, threshold_db=-40):
 
 def remove_progressive_repeats(text):
     """
-    Remove progressive repetition patterns like:
-    "I I am I am an I am an I am an app I am unemployed..."
+    Fix progressive hallucination where Whisper builds progressively longer versions:
+    "I am I am I am an I am an app I am an applied AI I am an applied AI student"
     
-    Strategy: Find progressively longer versions of the same prefix
-    and keep only the longest version, removing all shorter intermediate builds.
+    Solution: Extract the longest coherent phrase by finding the most complete sentence.
     """
     if not text:
         return text
@@ -354,64 +353,61 @@ def remove_progressive_repeats(text):
     if len(words) < 2:
         return text
     
-    # Find all positions where each word appears
-    # Then detect progressive patterns where word sequences keep extending
+    # Strategy: Find breakpoints where a new thought begins
+    # A breakpoint is where we see the same word sequence repeat
     
-    result_indices = list(range(len(words)))
-    indices_to_remove = set()
+    # Find the last occurrence of each word
+    last_occurrence = {}
+    for idx, word in enumerate(words):
+        last_occurrence[word.lower()] = idx
     
-    # Detect when a sequence repeats but longer
-    i = 0
-    while i < len(words):
-        # Try sequences of increasing length starting at position i
-        for seq_len in range(1, min(6, len(words) - i + 1)):
-            current_seq = words[i:i + seq_len]
+    # Find natural break points (where sequences stop repeating)
+    # by looking for words that don't appear again after their position
+    
+    # Alternative: Find the longest suffix that's coherent
+    # by checking which trailing sections have good word diversity
+    
+    best_result = text  # fallback
+    best_uniqueness = 0
+    
+    # Try different end points from longest to shortest
+    for end_idx in range(len(words), max(3, len(words)//2), -1):
+        candidate_words = words[:end_idx]
+        candidate_text = " ".join(candidate_words)
+        
+        # Calculate how unique this section is
+        word_set = set(w.lower() for w in candidate_words)
+        uniqueness_ratio = len(word_set) / len(candidate_words) if candidate_words else 0
+        
+        # Check if this looks like a complete thought (ends with more unique words)
+        # Get the last 3 words
+        if len(candidate_words) >= 3:
+            last_three = set(w.lower() for w in candidate_words[-3:])
+            # If last 3 words are distinct, likely a complete thought
+            if len(last_three) >= 2:
+                if uniqueness_ratio > best_uniqueness:
+                    best_uniqueness = uniqueness_ratio
+                    best_result = candidate_text
+    
+    # Further refinement: if we still have very low uniqueness, 
+    # just keep words from first NEW word onward
+    if best_uniqueness < 0.4:
+        # Find the first position where a word is truly new (appears only once)
+        word_counts = {}
+        for word in words:
+            w_lower = word.lower()
+            word_counts[w_lower] = word_counts.get(w_lower, 0) + 1
+        
+        # Start from position that has mostly unique words
+        for start_idx in range(len(words)):
+            remaining = words[start_idx:]
+            unique_count = sum(1 for w in remaining if word_counts[w.lower()] == 1)
             
-            # Look for this sequence appearing again (same starting words)
-            for future_i in range(i + 1, len(words)):
-                # Check if words starting at future_i match our current sequence
-                if future_i + seq_len <= len(words):
-                    future_seq = words[future_i:future_i + seq_len]
-                    
-                    if current_seq == future_seq:
-                        # Found a repeat - mark words from i to i+seq_len-1 for removal
-                        # UNLESS we're at the beginning
-                        if i > 0:
-                            for idx in range(i, i + seq_len):
-                                indices_to_remove.add(idx)
-                        break
-        i += 1
-    
-    # Build result excluding marked indices
-    result_words = [words[i] for i in range(len(words)) if i not in indices_to_remove]
-    
-    if not result_words:
-        return text
-    
-    result = " ".join(result_words)
-    
-    # Secondary pass: if result still seems repetitive, find longest increasing chain
-    result_words = result.split()
-    
-    if len(result_words) > 15:  # Only for long results
-        # Find longest chain that doesn't repeat too much
-        unique_ratios = []
-        for end_idx in range(len(result_words), len(result_words)//2, -1):
-            candidate = result_words[:end_idx]
-            unique = len(set(w.lower() for w in candidate))
-            ratio = unique / len(candidate) if candidate else 0
-            unique_ratios.append((end_idx, ratio))
-        
-        # Find the longest chunk with reasonable uniqueness (>40%)
-        best_end = len(result_words)
-        for end_idx, ratio in unique_ratios:
-            if ratio > 0.4:
-                best_end = end_idx
+            if unique_count / max(len(remaining), 1) > 0.5:  # More than 50% unique
+                best_result = " ".join(remaining)
                 break
-        
-        result = " ".join(result_words[:best_end])
     
-    return result.strip()
+    return best_result.strip()
 
 
 def transcribe_audio(audio_path):
@@ -522,6 +518,29 @@ INSTRUCTIONS:
   - Overall recommendation (Strongly Recommend / Recommend / Consider / Do Not Recommend)
 - When you give the final evaluation, end your message with the exact phrase: [INTERVIEW COMPLETE]"""
 
+def load_resume_text_from_file(resume_path):
+    """
+    Best-effort resume loader for backend calls.
+    - If it's a PDF and PyMuPDF is available, extract text.
+    - Otherwise, try to read it as UTF-8 text.
+    """
+    if not resume_path or not os.path.exists(resume_path):
+        return None
+
+    try:
+        if resume_path.lower().endswith('.pdf') and PDF_AVAILABLE:
+            return extract_resume_text(resume_path)
+    except Exception:
+        # Fall through to text read fallback
+        pass
+
+    try:
+        with open(resume_path, 'r', encoding='utf-8', errors='ignore') as f:
+            txt = f.read().strip()
+            return txt if txt else None
+    except Exception:
+        return None
+
 
 def chat_with_ollama(messages):
     payload = {
@@ -530,7 +549,7 @@ def chat_with_ollama(messages):
         "stream": True
     }
     try:
-        resp = requests.post(OLLAMA_URL, json=payload, timeout=120, stream=True)
+        resp = requests.post(OLLAMA_URL, json=payload, timeout=30, stream=True)
         resp.raise_for_status()
         full_response = ""
         for line in resp.iter_lines():
@@ -543,6 +562,8 @@ def chat_with_ollama(messages):
         return full_response
     except requests.ConnectionError:
         return "ERROR: Cannot connect to Ollama. Make sure it is running."
+    except requests.Timeout:
+        return "ERROR: Ollama timeout. Response took too long."
     except Exception as e:
         return f"ERROR: {e}"
 
@@ -681,6 +702,9 @@ parser = argparse.ArgumentParser(description='HR Interview Chatbot')
 parser.add_argument('--job-role', type=str, default='', help='Job role being interviewed for')
 parser.add_argument('--resume', type=str, default='', help='Path to resume text file')
 parser.add_argument('--output', type=str, default='', help='Output transcript file path (optional)')
+parser.add_argument('--mode', type=str, default='full', help='full (legacy) or next (next question generation)')
+parser.add_argument('--conversation', type=str, default='', help='Path to conversation JSON (for mode=next)')
+parser.add_argument('--max-questions', type=int, default=8, help='Max questions before marking interview complete')
 args = parser.parse_args()
 
 job_role = args.job_role.strip() if args.job_role else ''
@@ -695,13 +719,154 @@ if job_role and args.output:
     
     resume_text = None
     if args.resume and os.path.exists(args.resume):
-        try:
-            with open(args.resume, 'r', encoding='utf-8') as f:
-                resume_text = f.read().strip()
+        resume_text = load_resume_text_from_file(args.resume)
+        if resume_text:
             debug_info.append(f"Resume loaded: {len(resume_text)} characters")
+        else:
+            debug_info.append("Resume loaded: 0 characters (or could not parse)")
+
+    # Mode=next: generate next question based on conversation history.
+    if args.mode == 'next' and args.conversation and os.path.exists(args.conversation):
+        try:
+            with open(args.conversation, 'r', encoding='utf-8') as f:
+                convo = json.load(f)
+            qa_pairs = convo.get('questionsAnswers', []) or []
         except Exception as e:
-            debug_info.append(f"Warning: Could not read resume: {e}")
-    
+            debug_info.append(f"Failed to load conversation JSON: {e}")
+            qa_pairs = []
+
+        # Hard stop to avoid infinite interviews.
+        if len(qa_pairs) >= args.max_questions:
+            data = {
+                "done": True,
+                "nextQuestion": None,
+                "questionNumber": len(qa_pairs) + 1,
+                "uiMessage": "Interview complete. Thank you for your time.",
+                "debug": debug_info,
+            }
+            os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
+            with open(args.output, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            exit(0)
+
+        question_number = len(qa_pairs) + 1
+
+        # Build a prompt that forces JSON output for easy parsing in the backend.
+        resume_section = ""
+        if resume_text:
+            resume_section = f"\n\nCANDIDATE RESUME (text):\n\"\"\"\n{resume_text[:3000]}\n\"\"\"\n"
+
+        conversation_text = "\n".join(
+            [f"Q{i+1}: {x.get('question','')}\nA{i+1}: {x.get('answer','')}" for i, x in enumerate(qa_pairs)]
+        ).strip()
+
+        system_prompt = (
+            "You are an experienced, professional HR manager conducting a conversational AI interview. "
+            "Your goal is to ask the NEXT interview question based on the candidate's answers so far. "
+            "You must keep the flow natural and relevant to the job role."
+        )
+
+        user_prompt = (
+            f"JOB ROLE: {job_role}\n"
+            f"MAX QUESTIONS: {args.max_questions}\n"
+            f"QUESTIONS ALREADY ASKED: {len(qa_pairs)}\n"
+            f"{resume_section}\n"
+            f"CONVERSATION SO FAR:\n{conversation_text if conversation_text else '(none)'}\n\n"
+            "Decide whether the interview should continue.\n\n"
+            "Return ONLY valid JSON in this exact schema:\n"
+            "{\n"
+            '  "done": boolean,\n'
+            '  "nextQuestion": string | null,\n'
+            '  "questionNumber": integer,\n'
+            '  "uiMessage": string\n'
+            "}\n"
+            "\nRules:\n"
+            "- If done=true: set nextQuestion=null and uiMessage to a short completion message.\n"
+            "- If done=false: nextQuestion must contain exactly ONE next interview question (no numbering prefixes needed), "
+            "and uiMessage should be an optional short acknowledgment followed by the same question.\n"
+            "- Do not include markdown.\n"
+        )
+
+        fallback_result = None
+        try:
+            debug_info.append("Calling Ollama for next question...")
+            response = chat_with_ollama(
+                [{"role": "system", "content": system_prompt}, {"role": "user", "content": user_prompt}]
+            )
+
+            # Check if response is an error
+            if response.startswith("ERROR:"):
+                debug_info.append(f"Ollama error: {response}")
+                raise Exception(f"Ollama returned error: {response}")
+
+            # Extract JSON blob from the model response.
+            start = response.find('{')
+            end = response.rfind('}')
+            if start == -1 or end <= start:
+                debug_info.append(f"Could not find JSON in response: {response[:100]}")
+                raise Exception("Response does not contain valid JSON")
+                
+            json_blob = response[start:end+1]
+            parsed = json.loads(json_blob)
+            data = {
+                "done": bool(parsed.get("done", False)),
+                "nextQuestion": parsed.get("nextQuestion", None),
+                "questionNumber": int(parsed.get("questionNumber", question_number)),
+                "uiMessage": parsed.get("uiMessage", parsed.get("nextQuestion", "")) or "",
+                "debug": debug_info,
+            }
+            # Normalize null/empty nextQuestion
+            if data["done"]:
+                data["nextQuestion"] = None
+            os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
+            with open(args.output, 'w', encoding='utf-8') as f:
+                json.dump(data, f, indent=2, ensure_ascii=False)
+            exit(0)
+        except Exception as e:
+            debug_info.append(f"Next-question generation failed: {e}")
+
+        # Fallback: static generated questions, still progressing.
+        try:
+            debug_info.append(f"Falling back to generate_interview_questions({job_role})")
+            questions = generate_interview_questions(job_role, resume_text) or []
+        except Exception:
+            questions = []
+
+        if not questions:
+            questions = [
+                f"Please introduce yourself for the {job_role} role.",
+                "Tell us about a project you are proud of.",
+                "How do you handle deadlines and pressure?",
+                "Describe a challenge you solved with your team.",
+                "Why do you want to join this company?",
+            ]
+
+        next_idx = len(qa_pairs)
+        if next_idx >= args.max_questions or next_idx >= len(questions):
+            data = {
+                "done": True,
+                "nextQuestion": None,
+                "questionNumber": next_idx + 1,
+                "uiMessage": "Interview complete. Thank you for your time.",
+                "debug": debug_info,
+            }
+        else:
+            q = questions[next_idx]
+            data = {
+                "done": False,
+                "nextQuestion": q,
+                "questionNumber": next_idx + 1,
+                "uiMessage": q,
+                "debug": debug_info,
+            }
+
+        os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
+        with open(args.output, 'w', encoding='utf-8') as f:
+            json.dump(data, f, indent=2, ensure_ascii=False)
+        exit(0)
+
+    # Mode=full: legacy transcript generation (server-side report automation).
+
     # Generate questions using Ollama
     debug_info.append(f"Calling generate_interview_questions({job_role})")
     try:
@@ -717,20 +882,20 @@ if job_role and args.output:
             "Why do you want to join this company?",
         ]
         debug_info.append(f"Using fallback: {len(questions)} questions")
-    
+
     # Build mock transcript for backend
     transcript = []
     transcript.append({"role": "HR Manager", "content": f"Welcome to the interview for {job_role}. Thank you for taking the time to meet with me today. Let's begin!"})
-    
+
     qa_pairs = []
     for i, question in enumerate(questions, 1):
         transcript.append({"role": "HR Manager", "content": f"Question {i}: {question}"})
         mock_answer = "[Candidate answer will be provided during interview]"
         transcript.append({"role": "Candidate", "content": mock_answer})
         qa_pairs.append({"question": question, "answer": mock_answer})
-    
+
     transcript.append({"role": "HR Manager", "content": "Thank you for your responses. We'll be in touch with you soon."})
-    
+
     # Save transcript
     data = {
         "job_role": job_role,
@@ -739,11 +904,11 @@ if job_role and args.output:
         "questionsAnswers": qa_pairs,
         "debug": debug_info
     }
-    
+
     os.makedirs(os.path.dirname(args.output) or '.', exist_ok=True)
     with open(args.output, 'w', encoding='utf-8') as f:
         json.dump(data, f, indent=2, ensure_ascii=False)
-    
+
     exit(0)
 
 # ── Interactive mode (user running directly) ──────────────────

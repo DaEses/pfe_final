@@ -42,6 +42,8 @@ function CandidateInterview() {
   const cameraStreamRef = useRef(null);
   const stopMonitorRef = useRef(null);
   const recognitionRef = useRef(null);
+  const voiceSessionIdRef = useRef(0);
+  const finalizeStartedRef = useRef(false);
 
   const loadSession = useCallback(async () => {
     if (!token) {
@@ -55,9 +57,14 @@ function CandidateInterview() {
         token,
         body: { jobPostingId },
       });
-      if (ok && data?.questions) {
+      if (ok && Array.isArray(data?.questionsAnswers)) {
         setSession(data);
-        setAnswers(data.questions.map((q) => ({ question: q, answer: '' })));
+        setAnswers(data.questionsAnswers);
+        const idx = Number.isInteger(data?.currentQuestionIndex)
+          ? data.currentQuestionIndex
+          : 0;
+        setStep(Math.max(0, idx));
+        setCurrentAnswer(data?.questionsAnswers?.[idx]?.answer || '');
         setError('');
       } else {
         setError(
@@ -143,7 +150,11 @@ function CandidateInterview() {
     };
   }, [session?.interviewId, phase, token]);
 
+  // (auto-finalize is declared later, after finishInterview)
+
   const stopVoice = () => {
+    // Invalidate any pending callbacks from the current recognition session.
+    voiceSessionIdRef.current += 1;
     if (recognitionRef.current) {
       try {
         recognitionRef.current.stop();
@@ -163,6 +174,9 @@ function CandidateInterview() {
       return;
     }
     stopVoice();
+
+    const sessionId = ++voiceSessionIdRef.current;
+
     const recognition = new SpeechRecognition();
     recognition.lang = navigator.language?.startsWith('fr') ? 'fr-FR' : 'en-US';
     recognition.interimResults = true;
@@ -172,23 +186,60 @@ function CandidateInterview() {
     setListening(true);
     setVoiceHint('Listening… speak clearly, then pause.');
 
+    // Base at the moment microphone starts, so we don't re-insert old transcript.
+    const baseAtStart = (currentAnswer || '').trim();
+
+    // These two buffers keep the UI stable and prevent duplicate final chunks.
+    let finalizedText = '';
+    let interimText = '';
+    let lastFinalChunk = '';
+    let lastAppliedText = baseAtStart;
+
     const timeout = setTimeout(() => {
       stopVoice();
       setVoiceHint('Voice timeout — you can edit the text or try again.');
     }, 20000);
 
     recognition.onresult = (event) => {
-      let transcript = '';
+      if (sessionId !== voiceSessionIdRef.current) return; // ignore late callbacks
+
+      // Build progressive transcript from final chunks + latest interim.
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
-        transcript += event.results[i][0].transcript;
+        const res = event.results[i];
+        const chunk = res?.[0]?.transcript?.trim() || '';
+        if (!chunk) continue;
+
+        if (res.isFinal) {
+          // Ignore exact duplicates or already-ended content.
+          const alreadyHas =
+            chunk.toLowerCase() === lastFinalChunk.toLowerCase() ||
+            (finalizedText && finalizedText.toLowerCase().endsWith(chunk.toLowerCase()));
+          if (!alreadyHas) {
+            finalizedText = finalizedText
+              ? `${finalizedText} ${chunk}`
+              : chunk;
+            lastFinalChunk = chunk;
+          }
+          interimText = '';
+        } else {
+          interimText = chunk;
+        }
       }
-      setCurrentAnswer((prev) => {
-        const base = prev?.trim() || '';
-        return base ? `${base} ${transcript.trim()}` : transcript.trim();
-      });
+
+      const merged = [baseAtStart, finalizedText, interimText]
+        .filter(Boolean)
+        .join(' ')
+        .replace(/\s+/g, ' ')
+        .trim();
+
+      if (merged && merged !== lastAppliedText) {
+        lastAppliedText = merged;
+        setCurrentAnswer(merged);
+      }
     };
     recognition.onerror = (ev) => {
       clearTimeout(timeout);
+      if (sessionId !== voiceSessionIdRef.current) return;
       setListening(false);
       setVoiceHint(
         ev.error === 'not-allowed'
@@ -198,6 +249,7 @@ function CandidateInterview() {
     };
     recognition.onend = () => {
       clearTimeout(timeout);
+      if (sessionId !== voiceSessionIdRef.current) return;
       setListening(false);
       setVoiceHint('Voice captured. Review or edit your answer below.');
     };
@@ -220,33 +272,10 @@ function CandidateInterview() {
     return updated;
   };
 
-  const goNext = () => {
-    const updated = saveCurrentStepAnswer();
-    if (!updated[step].answer?.trim()) {
-      setError('Please type or record an answer before continuing.');
-      return;
-    }
-    setError('');
-    setCurrentAnswer('');
-    if (step < answers.length - 1) {
-      setStep(step + 1);
-      setCurrentAnswer(updated[step + 1].answer || '');
-    }
-  };
-
-  const goBack = () => {
-    if (step > 0) {
-      saveCurrentStepAnswer();
-      const prev = step - 1;
-      setStep(prev);
-      setCurrentAnswer(answers[prev].answer || '');
-      setError('');
-    }
-  };
-
-  const finishInterview = async () => {
-    const updated = saveCurrentStepAnswer();
-    if (!updated[step].answer?.trim()) {
+  const finishInterview = async (finalQuestionsAnswers) => {
+    const updated = finalQuestionsAnswers ?? saveCurrentStepAnswer();
+    const lastAnswer = updated?.[updated.length - 1]?.answer;
+    if (!lastAnswer?.trim()) {
       setError('Please answer the last question before finishing.');
       return;
     }
@@ -254,6 +283,7 @@ function CandidateInterview() {
     setSubmitting(true);
     setPhase('submitting');
     setError('');
+    stopVoice();
     stopMonitorRef.current?.();
     stopMonitorRef.current = null;
 
@@ -280,6 +310,66 @@ function CandidateInterview() {
       setSubmitting(false);
       stopCameraStream(cameraStreamRef.current);
       cameraStreamRef.current = null;
+    }
+  };
+
+  useEffect(() => {
+    if (!session?.isComplete) return;
+    if (phase !== 'questions') return;
+    if (finalizeStartedRef.current) return;
+    finalizeStartedRef.current = true;
+    // Finalize and create HR report even after reconnect/reload.
+    finishInterview(session.questionsAnswers);
+  }, [session?.isComplete, phase]);
+
+  const submitCurrentAnswer = async () => {
+    const updated = saveCurrentStepAnswer();
+    if (!updated[step]?.answer?.trim()) {
+      setError('Please type or record an answer before continuing.');
+      return;
+    }
+
+    setError('');
+    stopVoice();
+    setSubmitting(true);
+
+    try {
+      const { ok, data } = await apiRequest(
+        `/interviews/candidate/${session.interviewId}/answer`,
+        {
+          method: 'POST',
+          token,
+          body: { answer: updated[step].answer },
+        },
+      );
+
+      if (!ok) {
+        setError(data?.message || 'Failed to continue interview.');
+        setSubmitting(false);
+        return;
+      }
+
+      if (data?.done) {
+        await finishInterview(data?.questionsAnswers);
+        return;
+      }
+
+      const nextAnswers = Array.isArray(data?.questionsAnswers)
+        ? data.questionsAnswers
+        : updated;
+
+      setAnswers(nextAnswers);
+      const pendingIdx = nextAnswers.findIndex(
+        (qa) => !(qa.answer || '').trim(),
+      );
+      const nextIdx = pendingIdx === -1 ? step : pendingIdx;
+      setStep(nextIdx);
+      setCurrentAnswer(nextAnswers[nextIdx]?.answer || '');
+      setVoiceHint('');
+    } catch (e) {
+      setError(`Network error: ${e.message}`);
+    } finally {
+      setSubmitting(false);
     }
   };
 
@@ -344,8 +434,9 @@ function CandidateInterview() {
     );
   }
 
-  const isLast = step === answers.length - 1;
-  const progress = ((step + 1) / answers.length) * 100;
+  const totalQuestions = answers.length || 1;
+  const answeredCount = answers.filter((qa) => (qa.answer || '').trim()).length;
+  const progress = (answeredCount / totalQuestions) * 100;
   const phoneAlert = monitor.phoneDetections > 0;
   const paperAlert = monitor.paperDetections > 0;
 
@@ -380,7 +471,7 @@ function CandidateInterview() {
             <div className="progress-fill" style={{ width: `${progress}%` }} />
           </div>
           <p className="progress-label">
-            Question {step + 1} of {answers.length}
+            Question {answeredCount + 1}
           </p>
 
           {error && <div className="error-message">{error}</div>}
@@ -416,30 +507,18 @@ function CandidateInterview() {
             <button
               type="button"
               className="btn btn-secondary"
-              onClick={goBack}
-              disabled={step === 0 || submitting}
+              disabled={true}
             >
               Previous
             </button>
-            {!isLast ? (
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={goNext}
-                disabled={submitting}
-              >
-                Next question
-              </button>
-            ) : (
-              <button
-                type="button"
-                className="btn btn-primary"
-                onClick={finishInterview}
-                disabled={submitting}
-              >
-                Finish interview
-              </button>
-            )}
+            <button
+              type="button"
+              className="btn btn-primary"
+              onClick={submitCurrentAnswer}
+              disabled={submitting}
+            >
+              Submit answer
+            </button>
           </div>
         </div>
 

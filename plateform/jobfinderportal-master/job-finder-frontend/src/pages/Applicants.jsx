@@ -314,6 +314,76 @@ function Applicants() {
                 </div>
               </div>
 
+              <div className="detail-row">
+                <span className="detail-label">CV / Resume:</span>
+                <div className="detail-value">
+                  {selectedApplicant.applicantResume?.trim() ? (
+                    <>
+                      {selectedApplicant.applicantResume.startsWith(
+                        'data:application/pdf',
+                      ) ? (
+                        <iframe
+                          title="CV preview"
+                          src={selectedApplicant.applicantResume}
+                          style={{
+                            width: '100%',
+                            height: '360px',
+                            border: '1px solid rgba(0,0,0,0.08)',
+                            borderRadius: '8px',
+                          }}
+                        />
+                      ) : null}
+
+                      {selectedApplicant.applicantResume.startsWith('data:') &&
+                      !selectedApplicant.applicantResume.startsWith('data:application/pdf') ? (
+                        <p style={{ margin: '6px 0 10px', fontSize: '12px', color: '#666' }}>
+                          CV uploaded (preview available for PDF). You can view/download it below.
+                        </p>
+                      ) : null}
+
+                      {!selectedApplicant.applicantResume.startsWith('data:') ? (
+                        <pre
+                          style={{
+                            margin: '6px 0 10px',
+                            maxHeight: '220px',
+                            overflow: 'auto',
+                            whiteSpace: 'pre-wrap',
+                            fontSize: '12px',
+                            color: '#333',
+                            background: '#fafafa',
+                            padding: '10px',
+                            borderRadius: '8px',
+                            border: '1px solid rgba(0,0,0,0.06)',
+                          }}
+                        >
+                          {selectedApplicant.applicantResume}
+                        </pre>
+                      ) : null}
+
+                      <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap' }}>
+                        <a
+                          className="btn btn-secondary btn-small"
+                          href={selectedApplicant.applicantResume}
+                          target="_blank"
+                          rel="noreferrer"
+                        >
+                          View CV
+                        </a>
+                        <a
+                          className="btn btn-primary btn-small"
+                          href={selectedApplicant.applicantResume}
+                          download="candidate-cv"
+                        >
+                          Download CV
+                        </a>
+                      </div>
+                    </>
+                  ) : (
+                    <span>No CV uploaded.</span>
+                  )}
+                </div>
+              </div>
+
               {selectedApplicant.status === 'interview_completed' &&
                 selectedApplicant.interviews?.[0]?.id && (
                   <button

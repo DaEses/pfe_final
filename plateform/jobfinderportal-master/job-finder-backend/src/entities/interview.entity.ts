@@ -50,4 +50,13 @@ export class Interview {
 
   @Column()
   approverId: string;
+
+  // Dynamic chatbot interview state for the candidate session.
+  // This enables reconnection without losing conversation progress.
+  @Column('jsonb', { nullable: true })
+  chatbotState?: {
+    questionsAnswers: Array<{ question: string; answer: string }>;
+    done?: boolean;
+    lastBotMessage?: string;
+  };
 }

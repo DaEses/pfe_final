@@ -161,7 +161,8 @@ function JobSearch() {
     reader.onerror = () => {
       alert('Failed to read file');
     };
-    reader.readAsText(file);
+    // Store as a base64 data URL so HR can preview/download the CV.
+    reader.readAsDataURL(file);
   };
 
   const handleApplySubmit = async () => {

@@ -55,6 +55,59 @@ function InterviewReport() {
         <p className="candidate-name">Candidate: {report.candidateName}</p>
       </div>
 
+      {report.application?.applicantResume?.trim() ? (
+        <div className="report-card">
+          <h3>CV / Resume</h3>
+          {report.application.applicantResume.startsWith('data:application/pdf') ? (
+            <iframe
+              title="CV preview"
+              src={report.application.applicantResume}
+              style={{ width: '100%', height: '420px', border: '1px solid rgba(0,0,0,0.08)', borderRadius: '8px' }}
+            />
+          ) : null}
+
+          {!report.application.applicantResume.startsWith('data:') ? (
+            <pre
+              style={{
+                maxHeight: '240px',
+                overflow: 'auto',
+                whiteSpace: 'pre-wrap',
+                fontSize: '12px',
+                background: '#fafafa',
+                padding: '10px',
+                borderRadius: '8px',
+                border: '1px solid rgba(0,0,0,0.06)',
+              }}
+            >
+              {report.application.applicantResume}
+            </pre>
+          ) : null}
+
+          <div style={{ display: 'flex', gap: '10px', flexWrap: 'wrap', marginTop: '10px' }}>
+            <a
+              className="btn btn-secondary btn-small"
+              href={report.application.applicantResume}
+              target="_blank"
+              rel="noreferrer"
+            >
+              View CV
+            </a>
+            <a
+              className="btn btn-primary btn-small"
+              href={report.application.applicantResume}
+              download="candidate-cv"
+            >
+              Download CV
+            </a>
+          </div>
+        </div>
+      ) : (
+        <div className="report-card">
+          <h3>CV / Resume</h3>
+          <p className="report-note">No CV uploaded.</p>
+        </div>
+      )}
+
       {emotion.overallScore !== undefined && (
         <div className="report-card score-card">
           <h3>Overall Score</h3>

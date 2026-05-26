@@ -35,6 +35,12 @@ export class JobApplication {
   @Column('text', { nullable: true })
   coverLetter: string;
 
+  // Stored as a base64 data URL (e.g. "data:application/pdf;base64,...") or plain text.
+  // HR uses the bridged `Application.applicantResume`, but keeping it here as well
+  // makes reconnect/backfills reliable.
+  @Column('text', { nullable: true })
+  applicantResume: string | null;
+
   @CreateDateColumn()
   appliedAt: Date;
 
