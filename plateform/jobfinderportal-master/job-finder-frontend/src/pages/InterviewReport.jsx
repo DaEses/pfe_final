@@ -248,6 +248,73 @@ function InterviewReport() {
             )}
           </div>
 
+          {emotion.violationSummary && (
+            <div className="report-card">
+              <h3>Proctoring violation summary</h3>
+              <div className="emotion-grid">
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Phone events</p>
+                  <p className="emotion-stat-value">
+                    {emotion.violationSummary.phone ?? 0}
+                  </p>
+                </div>
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Paper events</p>
+                  <p className="emotion-stat-value">
+                    {emotion.violationSummary.paper ?? 0}
+                  </p>
+                </div>
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Gaze away samples</p>
+                  <p className="emotion-stat-value">
+                    {emotion.violationSummary.gazeAway ?? 0}
+                  </p>
+                </div>
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Gaze alerts</p>
+                  <p className="emotion-stat-value">
+                    {emotion.violationSummary.gazeAlerts ?? 0}
+                  </p>
+                </div>
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Emotion flags</p>
+                  <p className="emotion-stat-value">
+                    {emotion.violationSummary.emotionFlags ?? 0}
+                  </p>
+                </div>
+                {emotion.suspiciousEventCount !== undefined && (
+                  <div className="emotion-stat">
+                    <p className="emotion-stat-label">Suspicious events</p>
+                    <p className="emotion-stat-value risk-high">
+                      {emotion.suspiciousEventCount}
+                    </p>
+                  </div>
+                )}
+              </div>
+            </div>
+          )}
+
+          {Array.isArray(emotion.suspiciousEventTimeline) &&
+            emotion.suspiciousEventTimeline.length > 0 && (
+              <div className="report-card">
+                <h3>Suspicious event timeline (HR only)</h3>
+                <p className="report-note">
+                  Chronological log of phone, paper, and sustained gaze-away events.
+                </p>
+                <ul className="timestamp-list">
+                  {emotion.suspiciousEventTimeline.map((ev, idx) => (
+                    <li key={`sus-${idx}`}>
+                      {ev.at ? new Date(ev.at).toLocaleString() : '—'} —{' '}
+                      <strong>{ev.type}</strong>: {ev.detail}
+                      {ev.confidence != null
+                        ? ` (${Math.round(ev.confidence * 100)}%)`
+                        : ''}
+                    </li>
+                  ))}
+                </ul>
+              </div>
+            )}
+
           <div className="report-card">
             <h3>Paper / Document Detection</h3>
             <div className="emotion-grid">

@@ -176,6 +176,20 @@
   color: var(--text-h);
 }
 
+.candidate-camera-inline {
+  margin-bottom: 20px;
+}
+
+.candidate-camera-only {
+  max-width: 320px;
+  margin: 0 auto;
+}
+
+.camera-inline-error {
+  margin-top: 8px;
+  font-size: 13px;
+}
+
 .monitor-video-wrap {
   position: relative;
   border-radius: 10px;

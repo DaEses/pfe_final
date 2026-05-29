@@ -197,10 +197,14 @@ def _update_calibration(frame_bgr):
         _force_calibrated()
 
 
-def process_frame_path(image_path: str, write_preview: str | None = None):
+def process_frame_path(
+    image_path: str,
+    write_preview: str | None = None,
+    silent: bool = True,
+):
     """
     Full detection pipeline on one fresh frame.
-    Gaze, phone, and paper always run on the same frame copy.
+    When silent=True (default for web worker), no overlays are drawn — HR-only analytics.
     """
     global _pipeline_frames, _pipeline_t0
 
@@ -217,7 +221,7 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
     _plog(f"[FRAME] shape={frame.shape} path={image_path}")
     _plog("[PIPELINE] running detection on fresh frame copy...")
 
-    preview = frame.copy()
+    preview = frame.copy() if (write_preview and not silent) else None
     alerts = []
     _update_calibration(frame)
 
@@ -234,7 +238,8 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
         _stats["phoneDetections"] = int(_stats.get("phoneDetections", 0)) + 1
         _stats["lastPhoneAt"] = _append_timestamp(_stats, "phoneTimestamps")
         alerts.append("PHONE DETECTED")
-        draw_phone_boxes(preview, phone_boxes)
+        if preview is not None:
+            draw_phone_boxes(preview, phone_boxes)
 
     # ── Paper (same frame) ───────────────────────────────────────────────
     paper_boxes = []
@@ -249,7 +254,8 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
         _stats["paperDetections"] = int(_stats.get("paperDetections", 0)) + 1
         _stats["lastPaperAt"] = _append_timestamp(_stats, "paperTimestamps")
         alerts.append("PAPER DETECTED")
-        draw_paper_boxes(preview, paper_boxes)
+        if preview is not None:
+            draw_paper_boxes(preview, paper_boxes)
 
     # ── Emotion (same frame) ─────────────────────────────────────────────
     _stats["framesAnalyzed"] = int(_stats.get("framesAnalyzed", 0)) + 1
@@ -276,8 +282,9 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
                 {"at": datetime.utcnow().isoformat(), "emotion": emotion_label}
             )
             _stats["emotionTimeline"] = timeline[-300:]
-            cv2.rectangle(preview, (x, y), (x + fw, y + fh), color, 2)
-            draw_confidence_bar(preview, prob_neutral, x, y, fw)
+            if preview is not None:
+                cv2.rectangle(preview, (x, y), (x + fw, y + fh), color, 2)
+                draw_confidence_bar(preview, prob_neutral, x, y, fw)
     except Exception as exc:
         _record_pipeline_error("emotion", exc)
 
@@ -293,7 +300,8 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
         gaze_result = _gaze.process(frame)
         _stats["lastGazeDirection"] = gaze_result.get("direction", "center")
         _plog(f"[PIPELINE] gaze={gaze_result.get('direction')} h={gaze_result.get('h_ratio')}")
-        draw_gaze_eye_icon(preview, gaze_result)
+        if preview is not None:
+            draw_gaze_eye_icon(preview, gaze_result)
         if gaze_result.get("alert"):
             _stats["gazeAlerts"] = int(_stats.get("gazeAlerts", 0)) + 1
             direction = gaze_result.get("direction", "").upper()
@@ -304,18 +312,17 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
     if not _stats.get("calibrated"):
         emotion_label = "CALIBRATING"
 
-    draw_status_bar(preview, gaze_result, phone_boxes, paper_boxes, emotion_label)
-    cv2.putText(
-        preview,
-        f"PIPE FPS~{fps:.1f}",
-        (10, h_img - 10),
-        cv2.FONT_HERSHEY_SIMPLEX,
-        0.45,
-        (180, 255, 180),
-        1,
-    )
-
-    if write_preview:
+    if preview is not None:
+        draw_status_bar(preview, gaze_result, phone_boxes, paper_boxes, emotion_label)
+        cv2.putText(
+            preview,
+            f"PIPE FPS~{fps:.1f}",
+            (10, h_img - 10),
+            cv2.FONT_HERSHEY_SIMPLEX,
+            0.45,
+            (180, 255, 180),
+            1,
+        )
         cv2.imwrite(write_preview, preview)
 
     _stats["pipelineFps"] = round(fps, 2)
@@ -487,7 +494,9 @@ def main():
                 reset_detectors()
                 out = {"ok": True, "stats": _stats}
             elif op == "frame":
-                out = process_frame_path(cmd["path"], cmd.get("preview"))
+                silent = bool(cmd.get("silent", True))
+                preview_path = cmd.get("preview") if not silent else None
+                out = process_frame_path(cmd["path"], preview_path, silent=silent)
             elif op == "finalize":
                 out = {"ok": True, "summary": finalize_summary()}
             else:

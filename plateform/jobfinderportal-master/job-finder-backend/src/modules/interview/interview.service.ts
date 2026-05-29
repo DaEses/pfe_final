@@ -29,14 +29,19 @@ type EmotionWorkerHandle = {
   rejecters: Array<(err: Error) => void>;
 };
 
+type ProctoringEvent = {
+  at: string;
+  type: 'phone' | 'paper' | 'gaze' | 'gaze_alert' | 'emotion';
+  detail: string;
+  confidence?: number;
+};
+
 @Injectable()
 export class InterviewService {
   private readonly logger = new Logger(InterviewService.name);
   private readonly emotionWorkers = new Map<string, EmotionWorkerHandle>();
-  private readonly emotionLiveState = new Map<
-    string,
-    Record<string, unknown>
-  >();
+  /** HR-only live analytics — never returned to candidate APIs */
+  private readonly emotionHrState = new Map<string, Record<string, unknown>>();
 
   constructor(
     @InjectRepository(Interview)
@@ -462,6 +467,101 @@ export class InterviewService {
     );
   }
 
+  private getProctoringEventsPath(interviewId: string): string {
+    return path.join(this.getEmotionSessionDir(interviewId), 'proctoring_events.json');
+  }
+
+  private loadProctoringEvents(interviewId: string): ProctoringEvent[] {
+    const filePath = this.getProctoringEventsPath(interviewId);
+    if (!fs.existsSync(filePath)) return [];
+    try {
+      const raw = JSON.parse(fs.readFileSync(filePath, 'utf8')) as unknown;
+      return Array.isArray(raw) ? (raw as ProctoringEvent[]) : [];
+    } catch {
+      return [];
+    }
+  }
+
+  private saveProctoringEvents(
+    interviewId: string,
+    events: ProctoringEvent[],
+  ): void {
+    const filePath = this.getProctoringEventsPath(interviewId);
+    fs.mkdirSync(path.dirname(filePath), { recursive: true });
+    fs.writeFileSync(filePath, JSON.stringify(events.slice(-500), null, 2));
+  }
+
+  private appendProctoringEvents(
+    interviewId: string,
+    detection: Record<string, unknown> | undefined,
+    stats: Record<string, unknown>,
+  ): void {
+    const events = this.loadProctoringEvents(interviewId);
+    const at = new Date().toISOString();
+
+    const phones = (detection?.phoneBoxes as Array<{ conf?: number }>) ?? [];
+    for (const box of phones) {
+      events.push({
+        at,
+        type: 'phone',
+        detail: 'Phone detected',
+        confidence: typeof box.conf === 'number' ? box.conf : undefined,
+      });
+    }
+
+    const papers = (detection?.paperBoxes as Array<{ conf?: number }>) ?? [];
+    for (const box of papers) {
+      events.push({
+        at,
+        type: 'paper',
+        detail: 'Paper or document detected',
+        confidence: typeof box.conf === 'number' ? box.conf : undefined,
+      });
+    }
+
+    const gaze = String(detection?.gaze ?? stats.lastGazeDirection ?? 'center');
+    if (gaze && gaze !== 'center' && gaze !== 'calibrating' && gaze !== 'no_face') {
+      events.push({
+        at,
+        type: 'gaze',
+        detail: `Gaze: ${String(detection?.gazeLabel ?? gaze)}`,
+      });
+    }
+    if (detection?.gazeAlert === true) {
+      events.push({
+        at,
+        type: 'gaze_alert',
+        detail: `Sustained gaze away (${gaze})`,
+      });
+    }
+
+    const emotion = String(detection?.emotion ?? '');
+    if (emotion === 'IRRITATED') {
+      events.push({ at, type: 'emotion', detail: 'Irritated expression detected' });
+    }
+
+    this.saveProctoringEvents(interviewId, events);
+  }
+
+  private buildProctoringReportExtras(interviewId: string): Record<string, unknown> {
+    const events = this.loadProctoringEvents(interviewId);
+    const suspicious = events.filter((e) =>
+      ['phone', 'paper', 'gaze_alert'].includes(e.type),
+    );
+    return {
+      proctoringEvents: events,
+      suspiciousEventTimeline: suspicious.slice(-80),
+      suspiciousEventCount: suspicious.length,
+      violationSummary: {
+        phone: events.filter((e) => e.type === 'phone').length,
+        paper: events.filter((e) => e.type === 'paper').length,
+        gazeAway: events.filter((e) => e.type === 'gaze').length,
+        gazeAlerts: events.filter((e) => e.type === 'gaze_alert').length,
+        emotionFlags: events.filter((e) => e.type === 'emotion').length,
+      },
+    };
+  }
+
   private getEmotionPythonPaths(): {
     python: string;
     modelsDir: string;
@@ -600,15 +700,8 @@ export class InterviewService {
   async getEmotionSessionStatus(
     interviewId: string,
   ): Promise<Record<string, unknown>> {
-    return (
-      this.emotionLiveState.get(interviewId) ?? {
-        framesAnalyzed: 0,
-        phoneDetections: 0,
-        paperDetections: 0,
-        gazeAlerts: 0,
-        calibrated: false,
-      }
-    );
+    // Candidate-safe: no proctoring analytics exposed
+    return { ok: true, recording: true };
   }
 
   private async finalizeEmotionSession(
@@ -632,9 +725,13 @@ export class InterviewService {
         60_000,
       );
       const summary = (result.summary ?? {}) as Record<string, unknown>;
-      fs.writeFileSync(outputPath, JSON.stringify(summary, null, 2));
+      const fullSummary = {
+        ...summary,
+        ...this.buildProctoringReportExtras(interviewId),
+      };
+      fs.writeFileSync(outputPath, JSON.stringify(fullSummary, null, 2));
       this.stopEmotionWorker(interviewId);
-      return summary;
+      return fullSummary;
     } catch (err) {
       this.stopEmotionWorker(interviewId);
       return {
@@ -664,7 +761,6 @@ export class InterviewService {
 
     const buffer = Buffer.from(imageBase64, 'base64');
     const framePath = path.join(sessionDir, 'last_frame.jpg');
-    const previewPath = path.join(sessionDir, 'preview.jpg');
     fs.writeFileSync(framePath, buffer);
 
     try {
@@ -673,7 +769,7 @@ export class InterviewService {
         {
           op: 'frame',
           path: framePath,
-          preview: previewPath,
+          silent: true,
         },
         120_000,
       );
@@ -684,29 +780,18 @@ export class InterviewService {
 
       const stats = (result.stats ?? {}) as Record<string, unknown>;
       const detection = result.detection as Record<string, unknown> | undefined;
-      let previewBase64: string | undefined;
-      if (fs.existsSync(previewPath)) {
-        previewBase64 = fs.readFileSync(previewPath).toString('base64');
-      }
 
-      const live = {
-        ...stats,
-        detection,
-        previewBase64,
-        ok: true,
-      };
-      this.emotionLiveState.set(interviewId, live);
+      this.appendProctoringEvents(interviewId, detection, stats);
+      this.emotionHrState.set(interviewId, { ...stats, detection });
       fs.writeFileSync(
         path.join(sessionDir, 'stats.json'),
         JSON.stringify(stats, null, 2),
       );
-      return live;
+
+      return { ok: true };
     } catch (err) {
       this.logger.warn(`Frame analysis failed: ${err}`);
-      return {
-        ...(this.emotionLiveState.get(interviewId) ?? {}),
-        error: err instanceof Error ? err.message : String(err),
-      };
+      return { ok: false };
     }
   }
 
@@ -971,7 +1056,9 @@ export class InterviewService {
     }
 
     const emotionJson = await this.resolveEmotionSummary(interview);
-    const score = this.computeOverallScore(finalQuestionsAnswers, emotionJson);
+    const proctoringExtras = this.buildProctoringReportExtras(interview.id);
+    const emotionWithProctoring = { ...emotionJson, ...proctoringExtras };
+    const score = this.computeOverallScore(finalQuestionsAnswers, emotionWithProctoring);
 
     const answerPreview = finalQuestionsAnswers
       .map((qa, i) => `Q${i + 1}: ${(qa.answer || '').slice(0, 80)}`)
@@ -1020,13 +1107,16 @@ export class InterviewService {
         applicationId: application.id,
         candidateName: application.applicantName,
         questionsAnswers: finalQuestionsAnswers,
-        emotionSummary: { ...emotionJson, overallScore: score },
+        emotionSummary: { ...emotionWithProctoring, overallScore: score },
         finalDecisionHints: recommendation,
-        rawArtifacts: { emotionSource: emotionJson.source ?? 'unknown' },
+        rawArtifacts: {
+          emotionSource: emotionJson.source ?? 'unknown',
+          proctoringEventsPath: this.getProctoringEventsPath(interview.id),
+        },
       });
     } else {
       report.questionsAnswers = finalQuestionsAnswers;
-      report.emotionSummary = { ...emotionJson, overallScore: score };
+      report.emotionSummary = { ...emotionWithProctoring, overallScore: score };
       report.finalDecisionHints = recommendation;
       report.rawArtifacts = { emotionSource: emotionJson.source ?? 'unknown' };
     }
@@ -1062,9 +1152,8 @@ export class InterviewService {
     return {
       success: true,
       interviewId: interview.id,
-      score,
-      reportId: savedReport.id,
-      message: 'Interview completed. HR can view your report.',
+      message:
+        'Thank you. Your interview has been submitted. HR will review your responses.',
     };
   }
 

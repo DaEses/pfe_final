@@ -3,7 +3,7 @@ import { useNavigate, useParams } from 'react-router-dom';
 import { apiRequest, getJobSeekerToken } from '../../services/api';
 import {
   openUserCamera,
-  startParallelEmotionUpload,
+  startBackgroundProctoringUpload,
   stopCameraStream,
 } from '../../utils/interviewMonitor';
 import '../../styles/CandidateInterview.css';
@@ -23,25 +23,12 @@ function CandidateInterview() {
   const [currentAnswer, setCurrentAnswer] = useState('');
   const [listening, setListening] = useState(false);
   const [voiceHint, setVoiceHint] = useState('');
-  const [monitor, setMonitor] = useState({
-    framesAnalyzed: 0,
-    phoneDetections: 0,
-    paperDetections: 0,
-    gazeAlerts: 0,
-    lastDominantEmotion: 'NEUTRAL',
-    calibrated: false,
-    alerts: [],
-    gaze: 'center',
-    gazeLabel: 'Looking Center',
-    calibrationFrames: 0,
-  });
   const [cameraError, setCameraError] = useState('');
-  const [doneResult, setDoneResult] = useState(null);
+  const [cameraReady, setCameraReady] = useState(false);
 
   const videoRef = useRef(null);
-  const overlayRef = useRef(null);
   const cameraStreamRef = useRef(null);
-  const stopMonitorRef = useRef(null);
+  const stopProctoringRef = useRef(null);
   const recognitionRef = useRef(null);
   const voiceSessionIdRef = useRef(0);
   const finalizeStartedRef = useRef(false);
@@ -84,7 +71,7 @@ function CandidateInterview() {
     loadSession();
     return () => {
       stopVoice();
-      stopMonitorRef.current?.();
+      stopProctoringRef.current?.();
       stopCameraStream(cameraStreamRef.current);
     };
   }, [loadSession]);
@@ -107,45 +94,18 @@ function CandidateInterview() {
           await videoRef.current.play();
         }
         setCameraError('');
+        setCameraReady(true);
 
-        stopMonitorRef.current = startParallelEmotionUpload({
+        stopProctoringRef.current = startBackgroundProctoringUpload({
           videoEl: videoRef.current,
-          canvasEl: overlayRef.current,
           interviewId: session.interviewId,
           token,
           apiRequest,
-          onStatus: (data) => {
-            const det = data.detection || {};
-            const gazeDir = det.gaze ?? data.lastGazeDirection ?? 'center';
-            const gazeLabels = {
-              left: 'Looking Left',
-              right: 'Looking Right',
-              center: 'Looking Center',
-              up: 'Looking Up',
-              calibrating: 'Calibrating',
-              no_face: 'No Face',
-            };
-            setMonitor((prev) => ({
-              ...prev,
-              framesAnalyzed: data.framesAnalyzed ?? prev.framesAnalyzed,
-              phoneDetections: data.phoneDetections ?? prev.phoneDetections,
-              paperDetections: data.paperDetections ?? prev.paperDetections,
-              gazeAlerts: data.gazeAlerts ?? prev.gazeAlerts,
-              lastDominantEmotion:
-                data.lastDominantEmotion ?? det.emotion ?? prev.lastDominantEmotion,
-              calibrated: data.calibrated ?? prev.calibrated,
-              calibrationFrames:
-                data.calibrationFrames ?? prev.calibrationFrames,
-              gaze: gazeDir,
-              gazeLabel: det.gazeLabel ?? gazeLabels[gazeDir] ?? prev.gazeLabel,
-              alerts: det.alerts ?? prev.alerts,
-            }));
-          },
         });
       } catch (e) {
+        setCameraReady(false);
         setCameraError(
-          e.message ||
-            'Allow camera access — emotion & phone detection run during the interview.',
+          e.message || 'Please allow camera access to continue the interview.',
         );
       }
     };
@@ -154,15 +114,12 @@ function CandidateInterview() {
 
     return () => {
       cancelled = true;
-      stopMonitorRef.current?.();
-      stopMonitorRef.current = null;
+      stopProctoringRef.current?.();
+      stopProctoringRef.current = null;
     };
   }, [session?.interviewId, phase, token]);
 
-  // (auto-finalize is declared later, after finishInterview)
-
   const stopVoice = () => {
-    // Invalidate any pending callbacks from the current recognition session.
     voiceSessionIdRef.current += 1;
     if (recognitionRef.current) {
       try {
@@ -195,10 +152,8 @@ function CandidateInterview() {
     setListening(true);
     setVoiceHint('Listening… speak clearly, then pause.');
 
-    // Base at the moment microphone starts, so we don't re-insert old transcript.
     const baseAtStart = (currentAnswer || '').trim();
 
-    // These two buffers keep the UI stable and prevent duplicate final chunks.
     let finalizedText = '';
     let interimText = '';
     let lastFinalChunk = '';
@@ -210,19 +165,18 @@ function CandidateInterview() {
     }, 20000);
 
     recognition.onresult = (event) => {
-      if (sessionId !== voiceSessionIdRef.current) return; // ignore late callbacks
+      if (sessionId !== voiceSessionIdRef.current) return;
 
-      // Build progressive transcript from final chunks + latest interim.
       for (let i = event.resultIndex; i < event.results.length; i += 1) {
         const res = event.results[i];
         const chunk = res?.[0]?.transcript?.trim() || '';
         if (!chunk) continue;
 
         if (res.isFinal) {
-          // Ignore exact duplicates or already-ended content.
           const alreadyHas =
             chunk.toLowerCase() === lastFinalChunk.toLowerCase() ||
-            (finalizedText && finalizedText.toLowerCase().endsWith(chunk.toLowerCase()));
+            (finalizedText &&
+              finalizedText.toLowerCase().endsWith(chunk.toLowerCase()));
           if (!alreadyHas) {
             finalizedText = finalizedText
               ? `${finalizedText} ${chunk}`
@@ -293,8 +247,8 @@ function CandidateInterview() {
     setPhase('submitting');
     setError('');
     stopVoice();
-    stopMonitorRef.current?.();
-    stopMonitorRef.current = null;
+    stopProctoringRef.current?.();
+    stopProctoringRef.current = null;
 
     try {
       const { ok, data } = await apiRequest(
@@ -306,7 +260,6 @@ function CandidateInterview() {
         },
       );
       if (ok) {
-        setDoneResult({ score: data.score, reportId: data.reportId });
         setPhase('done');
       } else {
         setError(data?.message || 'Failed to submit interview.');
@@ -327,7 +280,6 @@ function CandidateInterview() {
     if (phase !== 'questions') return;
     if (finalizeStartedRef.current) return;
     finalizeStartedRef.current = true;
-    // Finalize and create HR report even after reconnect/reload.
     finishInterview(session.questionsAnswers);
   }, [session?.isComplete, phase]);
 
@@ -404,17 +356,14 @@ function CandidateInterview() {
     );
   }
 
-  if (phase === 'done' && doneResult) {
+  if (phase === 'done') {
     return (
       <div className="candidate-interview">
         <div className="interview-session-card done-card">
           <h1>Interview completed</h1>
-          <p className="done-score">
-            Your score: <strong>{doneResult.score}/10</strong>
-          </p>
           <p className="session-hint">
-            Written answers and Python emotion monitoring (phone, gaze, expressions)
-            were saved for HR.
+            Thank you. Your answers have been submitted. The hiring team will
+            review your interview and contact you about next steps.
           </p>
           <button
             type="button"
@@ -432,11 +381,8 @@ function CandidateInterview() {
     return (
       <div className="candidate-interview">
         <div className="interview-session-card">
-          <h1>Finalizing report</h1>
-          <p className="session-hint">
-            Processing your answers and emotion analysis (YOLO phone detection, gaze,
-            expressions)…
-          </p>
+          <h1>Submitting your interview</h1>
+          <p className="session-hint">Please wait while we save your answers…</p>
           <div className="loading">This may take up to one minute…</div>
         </div>
       </div>
@@ -446,144 +392,96 @@ function CandidateInterview() {
   const totalQuestions = answers.length || 1;
   const answeredCount = answers.filter((qa) => (qa.answer || '').trim()).length;
   const progress = (answeredCount / totalQuestions) * 100;
-  const phoneAlert = monitor.phoneDetections > 0;
-  const paperAlert = monitor.paperDetections > 0;
 
   return (
     <div className="candidate-interview">
-      <div className="interview-session-card interview-layout">
-        <div className="interview-main">
-          <div className="session-header">
-            <div>
-              <h1>AI Interview</h1>
-              <p className="session-subtitle">
-                {session.jobTitle} — {session.candidateName}
-              </p>
-            </div>
-            <button
-              type="button"
-              className="btn btn-secondary btn-sm"
-              onClick={() => navigate('/job-seeker/search')}
-              disabled={submitting}
-            >
-              Exit
-            </button>
+      <div className="interview-session-card">
+        <div className="session-header">
+          <div>
+            <h1>Interview</h1>
+            <p className="session-subtitle">
+              {session.jobTitle} — {session.candidateName}
+            </p>
           </div>
-
-          <p className="session-hint">
-          The camera stays active while you answer. You will see colored boxes
-          (face, phone) like the standalone Interview Monitor — powered by the same
-          Python module (YOLO + gaze + emotions).
-          </p>
-
-          <div className="progress-bar">
-            <div className="progress-fill" style={{ width: `${progress}%` }} />
-          </div>
-          <p className="progress-label">
-            Question {answeredCount + 1}
-          </p>
-
-          {error && <div className="error-message">{error}</div>}
-          {cameraError && <div className="error-message">{cameraError}</div>}
-
-          <div className="question-card">
-            <h2 className="question-text">{answers[step]?.question}</h2>
-
-            <label className="answer-label">Your answer (written or voice)</label>
-            <textarea
-              className="answer-input"
-              rows={6}
-              value={currentAnswer}
-              onChange={(e) => setCurrentAnswer(e.target.value)}
-              placeholder="Type your answer here…"
-              disabled={submitting}
-            />
-
-            <div className="answer-actions">
-              <button
-                type="button"
-                className={`btn btn-secondary btn-sm ${listening ? 'btn-active' : ''}`}
-                onClick={startVoiceInput}
-                disabled={submitting || listening}
-              >
-                {listening ? 'Listening…' : 'Use microphone'}
-              </button>
-            </div>
-            {voiceHint && <p className="voice-hint">{voiceHint}</p>}
-          </div>
-
-          <div className="nav-actions">
-            <button
-              type="button"
-              className="btn btn-secondary"
-              disabled={true}
-            >
-              Previous
-            </button>
-            <button
-              type="button"
-              className="btn btn-primary"
-              onClick={submitCurrentAnswer}
-              disabled={submitting}
-            >
-              Submit answer
-            </button>
-          </div>
+          <button
+            type="button"
+            className="btn btn-secondary btn-sm"
+            onClick={() => navigate('/job-seeker/search')}
+            disabled={submitting}
+          >
+            Exit
+          </button>
         </div>
 
-        <aside className="monitor-panel">
-          <p className="monitor-title">Live monitoring</p>
-          <div className="monitor-video-wrap">
-            <video ref={videoRef} className="monitor-video" playsInline muted autoPlay />
-            <canvas ref={overlayRef} className="monitor-overlay" />
-            <span className={`monitor-live ${cameraError ? 'off' : ''}`}>
-              {cameraError ? 'Camera off' : 'REC'}
-            </span>
+        <p className="session-hint">
+          Your camera must stay on during the interview. Answer each question
+          below — you will not see automated scoring or feedback during the session.
+        </p>
+
+        <div className="candidate-camera-inline">
+          <div className="monitor-video-wrap candidate-camera-only">
+            <video
+              ref={videoRef}
+              className="monitor-video"
+              playsInline
+              muted
+              autoPlay
+            />
+            {cameraReady && !cameraError && (
+              <span className="monitor-live">Camera on</span>
+            )}
           </div>
-          {monitor.alerts?.length > 0 && (
-            <p className="monitor-warning">{monitor.alerts.join(' · ')}</p>
+          {cameraError && (
+            <p className="error-message camera-inline-error">{cameraError}</p>
           )}
-          <ul className="monitor-stats">
-            <li>
-              <span>Frames</span>
-              <strong>{monitor.framesAnalyzed}</strong>
-            </li>
-            <li>
-              <span>Emotion</span>
-              <strong>{monitor.lastDominantEmotion}</strong>
-            </li>
-            <li>
-              <span>Gaze</span>
-              <strong className={monitor.gaze !== 'center' ? 'stat-warn' : ''}>
-                {monitor.gazeLabel || 'Looking Center'}
-              </strong>
-            </li>
-            <li>
-              <span>Gaze alerts</span>
-              <strong>{monitor.gazeAlerts}</strong>
-            </li>
-            <li className={phoneAlert ? 'stat-alert' : ''}>
-              <span>Phone</span>
-              <strong>{monitor.phoneDetections}</strong>
-            </li>
-            <li className={paperAlert ? 'stat-alert' : ''}>
-              <span>Paper</span>
-              <strong>{monitor.paperDetections}</strong>
-            </li>
-          </ul>
-          {phoneAlert && (
-            <p className="monitor-warning">Phone detected — recorded in HR report.</p>
-          )}
-          {paperAlert && (
-            <p className="monitor-warning">Paper/documents detected — recorded in HR report.</p>
-          )}
-          {!monitor.calibrated && (
-            <p className="monitor-note">
-              Calibrating gaze ({monitor.calibrationFrames || 0}/15) — look at the
-              camera.
-            </p>
-          )}
-        </aside>
+        </div>
+
+        <div className="progress-bar">
+          <div className="progress-fill" style={{ width: `${progress}%` }} />
+        </div>
+        <p className="progress-label">Question {answeredCount + 1}</p>
+
+        {error && <div className="error-message">{error}</div>}
+
+        <div className="question-card">
+          <h2 className="question-text">{answers[step]?.question}</h2>
+
+          <label className="answer-label">Your answer (written or voice)</label>
+          <textarea
+            className="answer-input"
+            rows={6}
+            value={currentAnswer}
+            onChange={(e) => setCurrentAnswer(e.target.value)}
+            placeholder="Type your answer here…"
+            disabled={submitting}
+          />
+
+          <div className="answer-actions">
+            <button
+              type="button"
+              className={`btn btn-secondary btn-sm ${listening ? 'btn-active' : ''}`}
+              onClick={startVoiceInput}
+              disabled={submitting || listening}
+            >
+              {listening ? 'Listening…' : 'Use microphone'}
+            </button>
+          </div>
+          {voiceHint && <p className="voice-hint">{voiceHint}</p>}
+        </div>
+
+        <div className="nav-actions">
+          <button type="button" className="btn btn-secondary" disabled>
+            Previous
+          </button>
+          <button
+            type="button"
+            className="btn btn-primary"
+            onClick={submitCurrentAnswer}
+            disabled={submitting}
+          >
+            Submit answer
+          </button>
+        </div>
       </div>
     </div>
   );
