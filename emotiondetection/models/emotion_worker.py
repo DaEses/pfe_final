@@ -64,9 +64,12 @@ def _append_timestamp(stats: dict, key: str, max_items: int = 200):
 def reset_detectors():
     global _gaze, _phone, _paper, _stats
     _stats = default_stats()
-    _gaze = GazeDetector()
+    if _gaze is None:
+        _gaze = GazeDetector()
+    else:
+        _gaze.reset_state()
     _phone = PhoneDetector()
-    _paper = PaperDetector(_phone._model)  # Share YOLO model
+    _paper = PaperDetector(_phone._model)
 
 
 def ensure_loaded():
@@ -85,7 +88,7 @@ def calibrate_step(frame_bgr):
     lm, w_px, h_px = _gaze._detect(frame_bgr)
     if lm is None:
         return False
-    h, v, _ = _gaze._ratios(lm, w_px, h_px)
+    h, v, _ = _gaze._compute_gaze_ratios(lm, w_px, h_px)
     if "calib_h" not in _stats:
         _stats["calib_h"] = []
         _stats["calib_v"] = []
@@ -98,6 +101,11 @@ def calibrate_step(frame_bgr):
         _gaze._h_off = _stats["gaze_h_off"]
         _gaze._v_off = _stats["gaze_v_off"]
         _gaze.calibrated = True
+        _gaze._h_ema = None
+        _gaze._v_ema = None
+        _gaze._h_history.clear()
+        _gaze._v_history.clear()
+        _gaze._direction = "center"
         _gaze._off_start = None
         _gaze._last_alert = 0.0
         _stats["calibrated"] = True

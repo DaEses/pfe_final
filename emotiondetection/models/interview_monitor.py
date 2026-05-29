@@ -4,6 +4,7 @@ import time
 import os
 import sys
 import urllib.request
+from collections import deque
 from keras.models import load_model
 import os as _os
 
@@ -81,23 +82,43 @@ def draw_confidence_bar(frame, prob_neutral, x, y, w):
 # ──────────────────────────────────────────────────────────
 
 class GazeDetector:
-    # ── MediaPipe landmark indices ──────────────────────────────────────────
-    L_IRIS       = 468
-    R_IRIS       = 473
-    L_EYE_OUTER  = 33
-    L_EYE_INNER  = 133
-    R_EYE_OUTER  = 263
-    R_EYE_INNER  = 362
-    L_EYE_TOP    = 159
-    L_EYE_BOT    = 145
+    """
+    Stable gaze estimation from MediaPipe iris landmarks.
 
-    # Calibrated horizontal ratio near 0.5 = center. Narrow band so left/right register.
-    LEFT_THR  = 0.44   # below → looking LEFT (subject's left)
-    RIGHT_THR = 0.56   # above → looking RIGHT
-    UP_THR    = 0.38   # below → looking UP
+    Stability techniques:
+      - Fresh landmarks every frame (no frame-skip stale reuse)
+      - Eye-width-normalized iris position (scale invariant)
+      - EMA + sliding-window median on horizontal ratio
+      - Hysteresis on left/center/right to prevent boundary flicker
+      - VIDEO running mode when processing sequential frames
+    """
+
+    # MediaPipe Face Landmarker indices
+    L_IRIS      = 468
+    R_IRIS      = 473
+    L_EYE_OUTER = 33
+    L_EYE_INNER = 133
+    R_EYE_OUTER = 263
+    R_EYE_INNER = 362
+    L_EYE_TOP   = 159
+    L_EYE_BOT   = 145
+    R_EYE_TOP   = 386
+    R_EYE_BOT   = 374
+
+    # Hysteresis thresholds on *smoothed* calibrated ratio (~0.5 = center)
+    LEFT_ENTER  = 0.40   # enter "left" below this
+    LEFT_EXIT   = 0.46   # leave "left" above this
+    RIGHT_ENTER = 0.60   # enter "right" above this
+    RIGHT_EXIT  = 0.54   # leave "right" below this
+    UP_ENTER    = 0.36
+    UP_EXIT     = 0.42
+
+    EMA_ALPHA       = 0.30   # lower = smoother (0.2–0.4 typical)
+    SMOOTH_WINDOW   = 8      # median window over recent frames
+    NO_FACE_HOLD    = 4      # keep last direction for brief dropout
+
     ALERT_SEC = 2.0
     COOLDOWN  = 5.0
-    GAZE_SKIP = 2      # Process gaze every 2 frames
 
     def __init__(self):
         import mediapipe as mp
@@ -110,69 +131,173 @@ class GazeDetector:
         )
         if not os.path.exists(model_path):
             print("Downloading face landmarker model (~30 MB) ...")
-            url = ("https://storage.googleapis.com/mediapipe-models/"
-                   "face_landmarker/face_landmarker/float16/1/face_landmarker.task")
+            url = (
+                "https://storage.googleapis.com/mediapipe-models/"
+                "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
+            )
             urllib.request.urlretrieve(url, model_path)
             print("Download complete.")
 
+        self._mp = mp
+        self._mp_vision = mp_vision
+        use_video = os.environ.get("GAZE_VIDEO_MODE", "1") != "0"
+        running_mode = (
+            mp_vision.RunningMode.VIDEO if use_video else mp_vision.RunningMode.IMAGE
+        )
+
         options = mp_vision.FaceLandmarkerOptions(
             base_options=mp_python.BaseOptions(model_asset_path=model_path),
+            running_mode=running_mode,
             output_face_blendshapes=False,
             output_facial_transformation_matrixes=False,
             num_faces=1,
         )
         self._landmarker = mp_vision.FaceLandmarker.create_from_options(options)
-        self._mp         = mp
-        self._h_off      = 0.0
-        self._v_off      = 0.0
-        self.calibrated  = False
-        self._off_start  = None
+        self._video_mode = use_video
+        self._timestamp_ms = 0
+
+        self.reset_state()
+
+    def reset_state(self):
+        """Clear smoothing buffers (call on session reset)."""
+        self._h_off = 0.0
+        self._v_off = 0.0
+        self.calibrated = False
+        self._off_start = None
         self._last_alert = 0.0
-        self._frame_n    = 0
-        self._last_gaze  = {'direction': 'center', 'h_ratio': None, 'v_ratio': None, 'alert': False}
+        self._frame_n = 0
+        self._timestamp_ms = 0
+        self._direction = "center"
+        self._h_ema = None
+        self._v_ema = None
+        self._h_history = deque(maxlen=self.SMOOTH_WINDOW)
+        self._v_history = deque(maxlen=self.SMOOTH_WINDOW)
+        self._no_face_streak = 0
+        self._last_gaze = {
+            "direction": "center",
+            "h_ratio": None,
+            "v_ratio": None,
+            "alert": False,
+        }
 
     def _pt(self, lm, idx, w, h):
         p = lm[idx]
-        return np.array([p.x * w, p.y * h])
+        return np.array([p.x * w, p.y * h], dtype=np.float64)
 
-    def _ratios(self, lm, w, h):
-        """Iris position within each eye (0=outer corner, 1=inner corner)."""
+    @staticmethod
+    def _iris_ratio_in_eye(iris, outer, inner, top, bottom):
+        """
+        Normalized iris position inside the eye socket (scale invariant).
+        Horizontal: 0 = outer canthus, 1 = inner canthus.
+        Vertical:   0 = top lid, 1 = bottom lid.
+        """
+        eye_w = inner - outer
+        width = float(np.linalg.norm(eye_w)) + 1e-6
+        h_ratio = float(np.dot(iris - outer, eye_w) / (width * width))
+        h_ratio = float(np.clip(h_ratio, 0.0, 1.0))
+
+        eye_h = bottom - top
+        height = float(np.linalg.norm(eye_h)) + 1e-6
+        v_ratio = float(np.dot(iris - top, eye_h) / (height * height))
+        v_ratio = float(np.clip(v_ratio, 0.0, 1.0))
+        return h_ratio, v_ratio, width
+
+    def _compute_gaze_ratios(self, lm, w, h):
+        """Per-frame pupil/iris ratios — never cached from prior frames."""
         l_out = self._pt(lm, self.L_EYE_OUTER, w, h)
         l_in  = self._pt(lm, self.L_EYE_INNER, w, h)
+        l_top = self._pt(lm, self.L_EYE_TOP, w, h)
+        l_bot = self._pt(lm, self.L_EYE_BOT, w, h)
         r_out = self._pt(lm, self.R_EYE_OUTER, w, h)
         r_in  = self._pt(lm, self.R_EYE_INNER, w, h)
+        r_top = self._pt(lm, self.R_EYE_TOP, w, h)
+        r_bot = self._pt(lm, self.R_EYE_BOT, w, h)
         l_iris = self._pt(lm, self.L_IRIS, w, h)
         r_iris = self._pt(lm, self.R_IRIS, w, h)
 
-        l_span = max(abs(l_in[0] - l_out[0]), 1e-6)
-        r_span = max(abs(r_in[0] - r_out[0]), 1e-6)
-        l_h = float(np.clip((l_iris[0] - l_out[0]) / l_span, 0.0, 1.0))
-        r_h = float(np.clip((r_iris[0] - r_out[0]) / r_span, 0.0, 1.0))
-        h_r = (l_h + r_h) / 2.0
+        l_center = (l_out + l_in + l_top + l_bot) / 4.0
+        r_center = (r_out + r_in + r_top + r_bot) / 4.0
 
-        e_top = self._pt(lm, self.L_EYE_TOP, w, h)[1]
-        e_bot = self._pt(lm, self.L_EYE_BOT, w, h)[1]
-        v_r = float(np.clip(
-            (l_iris[1] - e_top) / (max(abs(e_bot - e_top), 1e-6)),
-            0.0, 1.0,
-        ))
+        l_h, l_v, l_w = self._iris_ratio_in_eye(l_iris, l_out, l_in, l_top, l_bot)
+        r_h, r_v, r_w = self._iris_ratio_in_eye(r_iris, r_out, r_in, r_top, r_bot)
+
+        total_w = l_w + r_w + 1e-6
+        h_raw = (l_h * l_w + r_h * r_w) / total_w
+        v_raw = (l_v * l_w + r_v * r_w) / total_w
+
         debug = {
-            "leftEyeOuter": l_out.tolist(),
-            "leftEyeInner": l_in.tolist(),
-            "rightEyeOuter": r_out.tolist(),
-            "rightEyeInner": r_in.tolist(),
+            "leftEyeCenter": l_center.tolist(),
+            "rightEyeCenter": r_center.tolist(),
             "leftPupil": l_iris.tolist(),
             "rightPupil": r_iris.tolist(),
-            "leftRatio": round(l_h, 3),
-            "rightRatio": round(r_h, 3),
+            "leftRatio": round(l_h, 4),
+            "rightRatio": round(r_h, 4),
+            "leftEyeWidthPx": round(l_w, 1),
+            "rightEyeWidthPx": round(r_w, 1),
         }
-        return h_r, v_r, debug
+        return float(h_raw), float(v_raw), debug
+
+    def _smooth_ratio(self, raw_h, raw_v):
+        """EMA + median filter to suppress frame jitter."""
+        if self._h_ema is None:
+            self._h_ema = raw_h
+            self._v_ema = raw_v
+        else:
+            a = self.EMA_ALPHA
+            self._h_ema = a * raw_h + (1.0 - a) * self._h_ema
+            self._v_ema = a * raw_v + (1.0 - a) * self._v_ema
+
+        self._h_history.append(self._h_ema)
+        self._v_history.append(self._v_ema)
+
+        h_med = float(np.median(self._h_history))
+        v_med = float(np.median(self._v_history))
+        return h_med, v_med
+
+    def _classify_with_hysteresis(self, h_smooth, v_smooth):
+        """
+        Stable left/center/right using hysteresis — avoids flicker at thresholds.
+        """
+        d = self._direction
+
+        if d == "up":
+            if v_smooth <= self.UP_EXIT:
+                self._direction = "up"
+                return "up"
+            d = "center"
+        elif v_smooth < self.UP_ENTER:
+            self._direction = "up"
+            return "up"
+
+        if d == "left":
+            if h_smooth > self.LEFT_EXIT:
+                d = "center"
+        elif d == "right":
+            if h_smooth < self.RIGHT_EXIT:
+                d = "center"
+        else:
+            d = "center"
+
+        if d == "center":
+            if h_smooth < self.LEFT_ENTER:
+                d = "left"
+            elif h_smooth > self.RIGHT_ENTER:
+                d = "right"
+
+        self._direction = d
+        return d
 
     def _detect(self, frame_bgr):
         h_px, w_px = frame_bgr.shape[:2]
-        rgb      = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
-        result   = self._landmarker.detect(mp_image)
+
+        if self._video_mode:
+            self._timestamp_ms += int(os.environ.get("GAZE_FRAME_MS", "33"))
+            result = self._landmarker.detect_for_video(mp_image, self._timestamp_ms)
+        else:
+            result = self._landmarker.detect(mp_image)
+
         if not result.face_landmarks:
             return None, w_px, h_px
         return result.face_landmarks[0], w_px, h_px
@@ -181,84 +306,105 @@ class GazeDetector:
         print("\n[Gaze calibration] Look straight at the camera for 5 s ...")
         print("[Press SPACE to skip calibration, ESC to abort]")
         hs, vs, t0 = [], [], time.time()
-        frame_skip = 0
 
         while time.time() - t0 < 5.0:
             ok, frame = cap.read()
             if not ok:
                 break
-            
-            # Only detect every 5 frames to speed up calibration
-            frame_skip += 1
-            if frame_skip % 5 == 0:
-                lm, w_px, h_px = self._detect(frame)
-                if lm is not None:
-                    h, v, _ = self._ratios(lm, w_px, h_px)
-                    hs.append(h)
-                    vs.append(v)
+            lm, w_px, h_px = self._detect(frame)
+            if lm is not None:
+                h, v, _ = self._compute_gaze_ratios(lm, w_px, h_px)
+                hs.append(h)
+                vs.append(v)
 
             if display:
                 rem = max(0, 5 - int(time.time() - t0))
-                f2  = frame.copy()
-                cv2.putText(f2, f"CALIBRATING — look at camera ({rem}s)",
-                            (30, frame.shape[0] // 2), FONT, 0.9, (0, 220, 255), 2)
-                cv2.imshow('Interview Monitor', f2)
+                f2 = frame.copy()
+                cv2.putText(
+                    f2,
+                    f"CALIBRATING — look at camera ({rem}s)",
+                    (30, frame.shape[0] // 2),
+                    FONT,
+                    0.9,
+                    (0, 220, 255),
+                    2,
+                )
+                cv2.imshow("Interview Monitor", f2)
                 key = cv2.waitKey(1) & 0xFF
-                if key == 32:  # SPACE key - skip calibration
+                if key == 32:
                     print("[Gaze calibration] Skipped by user.")
                     return
-                elif key == 27:  # ESC key - abort
+                if key == 27:
                     print("[Gaze calibration] Aborted by user.")
                     return
 
         if hs:
-            self._h_off     = np.mean(hs) - 0.5
-            self._v_off     = np.mean(vs) - 0.5
+            self._h_off = float(np.median(hs)) - 0.5
+            self._v_off = float(np.median(vs)) - 0.5
             self.calibrated = True
-            print(f"[Gaze calibration] Done  h_off={self._h_off:.3f}  v_off={self._v_off:.3f}\n")
+            self._h_ema = None
+            self._v_ema = None
+            self._h_history.clear()
+            self._v_history.clear()
+            print(
+                f"[Gaze calibration] Done  h_off={self._h_off:.3f}  v_off={self._v_off:.3f}\n"
+            )
         else:
             print("[Gaze calibration] No face found — using defaults.\n")
 
     def process(self, frame_bgr):
+        """Run gaze on every call — fresh landmarks, smoothed output."""
         self._frame_n += 1
-        if self._frame_n % self.GAZE_SKIP != 0:
-            return self._last_gaze
-
         lm, w_px, h_px = self._detect(frame_bgr)
 
         if lm is None:
-            self._last_gaze = {'direction': 'no_face', 'h_ratio': None, 'v_ratio': None, 'alert': False}
+            self._no_face_streak += 1
+            if self._no_face_streak <= self.NO_FACE_HOLD and self._last_gaze.get("h_ratio") is not None:
+                out = dict(self._last_gaze)
+                out["direction"] = self._direction
+                out["alert"] = False
+                return out
+            self._last_gaze = {
+                "direction": "no_face",
+                "h_ratio": self._last_gaze.get("h_ratio"),
+                "v_ratio": self._last_gaze.get("v_ratio"),
+                "alert": False,
+            }
             return self._last_gaze
 
-        h_r, v_r, gaze_debug = self._ratios(lm, w_px, h_px)
-        h_cal = h_r - self._h_off
-        v_cal = v_r - self._v_off
-        gaze_debug["gazeRatio"] = round(h_cal, 3)
-        gaze_debug["gazeVertical"] = round(v_cal, 3)
-        gaze_debug["gazeRawH"] = round(h_r, 3)
-        gaze_debug["gazeRawV"] = round(v_r, 3)
+        self._no_face_streak = 0
+
+        h_raw, v_raw, gaze_debug = self._compute_gaze_ratios(lm, w_px, h_px)
+        h_cal_raw = h_raw - self._h_off
+        v_cal_raw = v_raw - self._v_off
+
+        h_smooth, v_smooth = self._smooth_ratio(h_cal_raw, v_cal_raw)
+        direction = self._classify_with_hysteresis(h_smooth, v_smooth)
+
+        gaze_debug.update(
+            {
+                "gazeRawH": round(h_raw, 4),
+                "gazeRawV": round(v_raw, 4),
+                "gazeRatio": round(h_smooth, 4),
+                "gazeVertical": round(v_smooth, 4),
+                "gazeInstantH": round(h_cal_raw, 4),
+                "classification": direction,
+            }
+        )
 
         if os.environ.get("LOG_GAZE_DEBUG", "0") == "1":
             print(
-                f"[GAZE] pupil L={gaze_debug['leftPupil']} R={gaze_debug['rightPupil']} | "
-                f"ratio h={h_cal:.3f} (raw {h_r:.3f}) v={v_cal:.3f} | "
-                f"thr L<{self.LEFT_THR} R>{self.RIGHT_THR}",
+                f"[GAZE] frame={self._frame_n} | "
+                f"L_pupil={gaze_debug['leftPupil']} R_pupil={gaze_debug['rightPupil']} | "
+                f"L_center={gaze_debug['leftEyeCenter']} R_center={gaze_debug['rightEyeCenter']} | "
+                f"ratio instant={h_cal_raw:.3f} smooth={h_smooth:.3f} | "
+                f"class={direction}",
                 flush=True,
             )
 
-        if v_cal < self.UP_THR:
-            direction = "up"
-        elif h_cal < self.LEFT_THR:
-            direction = "left"
-        elif h_cal > self.RIGHT_THR:
-            direction = "right"
-        else:
-            direction = "center"
-
-        now   = time.time()
+        now = time.time()
         alert = False
-
-        if direction != 'center':
+        if direction not in ("center", "no_face"):
             if self._off_start is None:
                 self._off_start = now
             elif (now - self._off_start) >= self.ALERT_SEC:
@@ -270,10 +416,11 @@ class GazeDetector:
 
         self._last_gaze = {
             "direction": direction,
-            "h_ratio": h_cal,
-            "v_ratio": v_cal,
-            "h_raw": h_r,
-            "v_raw": v_r,
+            "h_ratio": h_smooth,
+            "v_ratio": v_smooth,
+            "h_raw": h_raw,
+            "v_raw": v_raw,
+            "h_instant": h_cal_raw,
             "alert": alert,
             "debug": gaze_debug,
         }
@@ -339,13 +486,14 @@ class PaperDetector:
     CONF_THR     = 0.22
     SKIP         = 3
 
-    MIN_AREA_RATIO = 0.025
-    MAX_AREA_RATIO = 0.85
-    # Aspect ratio of A4 paper (portrait or landscape)
-    MIN_ASPECT = 0.55
-    MAX_ASPECT = 2.50
-    # Rectangularity threshold: how close to a 4-sided polygon
-    RECT_EPSILON = 0.04
+    # Contour filters — reject full-frame false positives
+    MIN_AREA_PIXELS = 5000          # ignore tiny noise
+    MAX_AREA_RATIO  = 0.60          # reject if contour/bbox > 60% of frame
+    MIN_AREA_RATIO  = 0.025         # ignore specks (< ~2.5% of frame)
+    MIN_ASPECT      = 0.50          # document-like width/height (portrait or landscape)
+    MAX_ASPECT      = 1.80
+    RECT_EPSILON    = 0.02          # tighter approx → fewer full-frame quads
+    FRAME_EDGE_MARGIN = 12          # px inset — frame-border contours touch all edges
 
     def __init__(self, yolo_model=None):
         from ultralytics import YOLO
@@ -357,9 +505,52 @@ class PaperDetector:
         self._frame_n = 0
         self._last    = []
 
+    def _is_valid_document_shape(
+        self, x, y, bw, bh, contour_area, frame_w, frame_h, frame_area
+    ):
+        """
+        Reject full-screen / frame-border false positives.
+        Only pass document-sized quadrilaterals with paper-like aspect ratio.
+        """
+        if bw <= 0 or bh <= 0:
+            return False
+        if contour_area < self.MIN_AREA_PIXELS:
+            return False
+        if contour_area > frame_area * self.MAX_AREA_RATIO:
+            return False
+
+        bbox_area = bw * bh
+        if bbox_area < self.MIN_AREA_PIXELS:
+            return False
+        if bbox_area > frame_area * self.MAX_AREA_RATIO:
+            return False
+
+        aspect = bw / float(bh)
+        if not (self.MIN_ASPECT <= aspect <= self.MAX_ASPECT):
+            return False
+
+        m = self.FRAME_EDGE_MARGIN
+        touches_left   = x <= m
+        touches_top    = y <= m
+        touches_right  = (x + bw) >= (frame_w - m)
+        touches_bottom = (y + bh) >= (frame_h - m)
+        edge_count = sum([touches_left, touches_top, touches_right, touches_bottom])
+        # Full-frame border contour touches all four edges
+        if edge_count >= 4:
+            return False
+        if edge_count >= 3 and bbox_area > frame_area * 0.45:
+            return False
+
+        # Hard cap: never accept a box covering most of the frame
+        if bw >= frame_w * 0.90 and bh >= frame_h * 0.90:
+            return False
+
+        return True
+
     def _detect_yolo(self, frame_bgr):
-        """YOLO-based detection (book/document classes)."""
+        """YOLO-based detection (book/document classes), same geometry filters."""
         h, w = frame_bgr.shape[:2]
+        frame_area = h * w
         small = cv2.resize(frame_bgr, (w // 2, h // 2))
         try:
             results = self._model(
@@ -370,34 +561,61 @@ class PaperDetector:
         boxes = []
         for box in results.boxes:
             conf = float(box.conf[0])
-            if conf >= self.CONF_THR:
-                x1, y1, x2, y2 = map(int, box.xyxy[0])
-                # Scale back to original resolution
-                x1, y1, x2, y2 = x1 * 2, y1 * 2, x2 * 2, y2 * 2
-                boxes.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'conf': conf})
+            if conf < self.CONF_THR:
+                continue
+            x1, y1, x2, y2 = map(int, box.xyxy[0])
+            x1, y1, x2, y2 = x1 * 2, y1 * 2, x2 * 2, y2 * 2
+            bw, bh = x2 - x1, y2 - y1
+            area = bw * bh
+            if not self._is_valid_document_shape(
+                x1, y1, bw, bh, area, w, h, frame_area
+            ):
+                continue
+            boxes.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2, "conf": conf})
         return boxes
 
-    def _quads_from_mask(self, mask, frame_area):
+    def _quads_from_mask(self, mask, frame_w, frame_h, frame_area):
+        """
+        Extract document quads from a binary mask.
+        Uses RETR_EXTERNAL only — no nested / full-frame child contours.
+        """
         kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
         mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
-        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+        # Shrink mask slightly so frame edges are less likely to form one huge contour
+        mask = cv2.erode(mask, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), 1)
+
+        contours, _ = cv2.findContours(
+            mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
         boxes = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < frame_area * self.MIN_AREA_RATIO or area > frame_area * self.MAX_AREA_RATIO:
+            if area < self.MIN_AREA_PIXELS:
                 continue
+            if area < frame_area * self.MIN_AREA_RATIO:
+                continue
+            if area > frame_area * self.MAX_AREA_RATIO:
+                continue
+
             peri = cv2.arcLength(cnt, True)
             approx = cv2.approxPolyDP(cnt, self.RECT_EPSILON * peri, True)
-            if len(approx) < 4 or len(approx) > 6:
+
+            # Must be a quadrilateral (paper sheet), not 5–6 point frame polygon
+            if len(approx) != 4:
                 continue
+            if not cv2.isContourConvex(approx):
+                continue
+
             x, y, bw, bh = cv2.boundingRect(approx)
-            if bw < 40 or bh < 40:
+            if not self._is_valid_document_shape(
+                x, y, bw, bh, area, frame_w, frame_h, frame_area
+            ):
                 continue
-            aspect = bw / float(bh)
-            if not (self.MIN_ASPECT <= aspect <= self.MAX_ASPECT):
-                continue
+
             rect_area = bw * bh
             fill_ratio = area / max(rect_area, 1)
+            if fill_ratio < 0.55:
+                continue
             conf = round(min(0.95, 0.45 + fill_ratio * 0.5), 2)
             boxes.append({"x1": x, "y1": y, "x2": x + bw, "y2": y + bh, "conf": conf})
         return boxes
@@ -415,17 +633,20 @@ class PaperDetector:
         high = max(60, int(1.0 * otsu_thr))
         edges = cv2.Canny(blurred, low, high)
         edges = cv2.dilate(edges, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), 1)
-        boxes.extend(self._quads_from_mask(edges, frame_area))
+        boxes.extend(self._quads_from_mask(edges, img_w, img_h, frame_area))
 
         hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
         white_mask = cv2.inRange(hsv, (0, 0, 145), (180, 70, 255))
-        boxes.extend(self._quads_from_mask(white_mask, frame_area))
+        boxes.extend(self._quads_from_mask(white_mask, img_w, img_h, frame_area))
 
         if os.environ.get("LOG_PAPER_DEBUG", "0") == "1":
-            print(f"[PAPER] contour candidates: {len(boxes)}", flush=True)
+            print(f"[PAPER] valid contour candidates: {len(boxes)}", flush=True)
 
         if boxes:
-            boxes.sort(key=lambda b: (b["x2"] - b["x1"]) * (b["y2"] - b["y1"]), reverse=True)
+            boxes.sort(
+                key=lambda b: (b["x2"] - b["x1"]) * (b["y2"] - b["y1"]),
+                reverse=True,
+            )
             return [boxes[0]]
         return []
 
