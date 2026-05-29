@@ -4,7 +4,7 @@
 // caused the <video> element to hang. The RAF loop now only draws lightweight
 // detection overlays on a *transparent* canvas sitting on top of the video,
 // instead of re-compositing the full video frame every frame.
-const FRAME_INTERVAL_MS = 2500;
+const FRAME_INTERVAL_MS = 1800;
 const OVERLAY_FPS_MS = 100; // ~10 overlay redraws/s — keeps preview smooth without GPU saturation
 const JPEG_QUALITY = 0.75;
 

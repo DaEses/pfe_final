@@ -120,9 +120,15 @@ def _force_calibrated():
     else:
         _gaze._h_off = 0.0
         _gaze._v_off = 0.0
+    if _stats.get("calib_diff"):
+        _gaze._diff_off = float(np.median(_stats["calib_diff"]))
+    else:
+        _gaze._diff_off = 0.0
     _gaze._h_ema = None
+    _gaze._diff_ema = None
     _gaze._v_ema = None
     _gaze._h_history.clear()
+    _gaze._diff_history.clear()
     _gaze._v_history.clear()
     _gaze._direction = "center"
     _plog("[PIPELINE] calibration forced with defaults")
@@ -132,22 +138,28 @@ def calibrate_step(frame_bgr):
     lm, w_px, h_px = _gaze._detect(frame_bgr)
     if lm is None:
         return False
-    h, v, _ = _gaze._compute_gaze_ratios(lm, w_px, h_px)
+    h, d, v, _ = _gaze._compute_gaze_ratios(lm, w_px, h_px)
     if "calib_h" not in _stats:
         _stats["calib_h"] = []
+        _stats["calib_diff"] = []
         _stats["calib_v"] = []
     _stats["calib_h"].append(float(h))
+    _stats["calib_diff"].append(float(d))
     _stats["calib_v"].append(float(v))
     _stats["calibrationFrames"] = len(_stats["calib_h"])
     if _stats["calibrationFrames"] >= CALIBRATION_TARGET:
         _stats["gaze_h_off"] = float(np.median(_stats["calib_h"])) - 0.5
+        _stats["gaze_diff_off"] = float(np.median(_stats["calib_diff"]))
         _stats["gaze_v_off"] = float(np.median(_stats["calib_v"])) - 0.5
         _gaze._h_off = _stats["gaze_h_off"]
+        _gaze._diff_off = _stats["gaze_diff_off"]
         _gaze._v_off = _stats["gaze_v_off"]
         _gaze.calibrated = True
         _gaze._h_ema = None
+        _gaze._diff_ema = None
         _gaze._v_ema = None
         _gaze._h_history.clear()
+        _gaze._diff_history.clear()
         _gaze._v_history.clear()
         _gaze._direction = "center"
         _gaze._off_start = None
@@ -155,6 +167,7 @@ def calibrate_step(frame_bgr):
         _stats["calibrated"] = True
         if "calib_h" in _stats:
             del _stats["calib_h"]
+            del _stats["calib_diff"]
             del _stats["calib_v"]
         return True
     return False

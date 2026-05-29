@@ -118,17 +118,27 @@ class GazeDetector:
     R_EYE_TOP   = 386
     R_EYE_BOT   = 374
 
-    # Hysteresis thresholds on *smoothed* calibrated ratio (~0.5 = center)
-    LEFT_ENTER  = 0.40   # enter "left" below this
-    LEFT_EXIT   = 0.46   # leave "left" above this
-    RIGHT_ENTER = 0.60   # enter "right" above this
-    RIGHT_EXIT  = 0.54   # leave "right" below this
+    # Primary signal: h_diff = r_h - l_h (iris asymmetry; resists cancel when averaging eyes)
+    # On a mirror-flipped frame: look subject-left -> r_h rises, l_h falls -> h_diff > 0
+    DIFF_LEFT_ENTER  = 0.045   # enter "left"
+    DIFF_LEFT_EXIT   = 0.028   # leave "left" back to center
+    DIFF_RIGHT_ENTER = -0.045  # enter "right"
+    DIFF_RIGHT_EXIT  = -0.028  # leave "right"
+
+    # Backup: averaged iris ratio (~0.5 = center) for extreme head+eye combos
+    AVG_LEFT_ENTER  = 0.43
+    AVG_LEFT_EXIT   = 0.47
+    AVG_RIGHT_ENTER = 0.57
+    AVG_RIGHT_EXIT  = 0.53
+
     UP_ENTER    = 0.36
     UP_EXIT     = 0.42
 
-    EMA_ALPHA       = 0.30   # lower = smoother (0.2–0.4 typical)
-    SMOOTH_WINDOW   = 8      # median window over recent frames
-    NO_FACE_HOLD    = 4      # keep last direction for brief dropout
+    # Faster smoothing — web worker sends ~1 frame / 2.5s, not 30fps video
+    EMA_ALPHA       = float(os.environ.get("GAZE_EMA_ALPHA", "0.55"))
+    SMOOTH_WINDOW   = _env_int("GAZE_SMOOTH_WINDOW", 4)
+    SNAP_DIFF       = 0.09   # instant left/right if |diff| exceeds this
+    NO_FACE_HOLD    = 4
 
     ALERT_SEC = 2.0
     COOLDOWN  = 5.0
@@ -176,6 +186,7 @@ class GazeDetector:
     def reset_state(self):
         """Clear smoothing buffers (call on session reset)."""
         self._h_off = 0.0
+        self._diff_off = 0.0
         self._v_off = 0.0
         self.calibrated = False
         self._off_start = None
@@ -184,8 +195,10 @@ class GazeDetector:
         self._timestamp_ms = 0
         self._direction = "center"
         self._h_ema = None
+        self._diff_ema = None
         self._v_ema = None
         self._h_history = deque(maxlen=self.SMOOTH_WINDOW)
+        self._diff_history = deque(maxlen=self.SMOOTH_WINDOW)
         self._v_history = deque(maxlen=self.SMOOTH_WINDOW)
         self._no_face_streak = 0
         self._last_gaze = {
@@ -240,6 +253,11 @@ class GazeDetector:
         h_raw = (l_h * l_w + r_h * r_w) / total_w
         v_raw = (l_v * l_w + r_v * r_w) / total_w
 
+        # Differential horizontal gaze — much more sensitive than (l_h + r_h) / 2
+        h_diff = float(r_h - l_h)
+        if os.environ.get("GAZE_SWAP_LR", "0") == "1":
+            h_diff = -h_diff
+
         debug = {
             "leftEyeCenter": l_center.tolist(),
             "rightEyeCenter": r_center.tolist(),
@@ -247,60 +265,70 @@ class GazeDetector:
             "rightPupil": r_iris.tolist(),
             "leftRatio": round(l_h, 4),
             "rightRatio": round(r_h, 4),
+            "hDiff": round(h_diff, 4),
             "leftEyeWidthPx": round(l_w, 1),
             "rightEyeWidthPx": round(r_w, 1),
         }
-        return float(h_raw), float(v_raw), debug
+        return float(h_raw), h_diff, float(v_raw), debug
 
-    def _smooth_ratio(self, raw_h, raw_v):
-        """EMA + median filter to suppress frame jitter."""
-        if self._h_ema is None:
-            self._h_ema = raw_h
-            self._v_ema = raw_v
+    def _smooth_scalar(self, raw: float, ema_attr: str, hist_deque: deque) -> float:
+        ema = getattr(self, ema_attr)
+        if ema is None:
+            ema = raw
         else:
             a = self.EMA_ALPHA
-            self._h_ema = a * raw_h + (1.0 - a) * self._h_ema
-            self._v_ema = a * raw_v + (1.0 - a) * self._v_ema
+            ema = a * raw + (1.0 - a) * ema
+        setattr(self, ema_attr, ema)
+        hist_deque.append(ema)
+        return float(np.median(hist_deque))
 
-        self._h_history.append(self._h_ema)
-        self._v_history.append(self._v_ema)
-
-        h_med = float(np.median(self._h_history))
-        v_med = float(np.median(self._v_history))
-        return h_med, v_med
-
-    def _classify_with_hysteresis(self, h_smooth, v_smooth):
+    def _classify_horizontal(self, h_diff_smooth: float, h_avg_smooth: float) -> str:
         """
-        Stable left/center/right using hysteresis — avoids flicker at thresholds.
+        Classify left/center/right from differential (primary) + average (backup).
+        h_diff_smooth: calibrated r_h - l_h, ~0 when looking at camera.
+        h_avg_smooth: calibrated average ratio, ~0.5 when centered.
         """
         d = self._direction
 
-        if d == "up":
-            if v_smooth <= self.UP_EXIT:
-                self._direction = "up"
-                return "up"
-            d = "center"
-        elif v_smooth < self.UP_ENTER:
-            self._direction = "up"
-            return "up"
+        # Strong instantaneous asymmetry — snap immediately (sparse uploads)
+        if h_diff_smooth >= self.DIFF_LEFT_ENTER + 0.02:
+            self._direction = "left"
+            return "left"
+        if h_diff_smooth <= self.DIFF_RIGHT_ENTER - 0.02:
+            self._direction = "right"
+            return "right"
 
         if d == "left":
-            if h_smooth > self.LEFT_EXIT:
+            if h_diff_smooth < self.DIFF_LEFT_EXIT:
                 d = "center"
         elif d == "right":
-            if h_smooth < self.RIGHT_EXIT:
+            if h_diff_smooth > self.DIFF_RIGHT_EXIT:
                 d = "center"
         else:
             d = "center"
 
         if d == "center":
-            if h_smooth < self.LEFT_ENTER:
+            if h_diff_smooth >= self.DIFF_LEFT_ENTER:
                 d = "left"
-            elif h_smooth > self.RIGHT_ENTER:
+            elif h_diff_smooth <= self.DIFF_RIGHT_ENTER:
                 d = "right"
+            elif h_avg_smooth >= self.AVG_RIGHT_ENTER:
+                d = "right"
+            elif h_avg_smooth <= self.AVG_LEFT_ENTER:
+                d = "left"
 
         self._direction = d
         return d
+
+    def _classify_with_hysteresis(self, h_diff_smooth, h_avg_smooth, v_smooth):
+        """Full gaze direction including vertical."""
+        if v_smooth < self.UP_ENTER:
+            self._direction = "up"
+            return "up"
+        if self._direction == "up" and v_smooth < self.UP_EXIT:
+            return "up"
+
+        return self._classify_horizontal(h_diff_smooth, h_avg_smooth)
 
     def _detect(self, frame_bgr):
         h_px, w_px = frame_bgr.shape[:2]
@@ -324,7 +352,7 @@ class GazeDetector:
     def calibrate(self, cap, display=True):
         print("\n[Gaze calibration] Look straight at the camera for 5 s ...")
         print("[Press SPACE to skip calibration, ESC to abort]")
-        hs, vs, t0 = [], [], time.time()
+        hs, diffs, vs, t0 = [], [], [], time.time()
 
         while time.time() - t0 < 5.0:
             ok, frame = cap.read()
@@ -332,8 +360,9 @@ class GazeDetector:
                 break
             lm, w_px, h_px = self._detect(frame)
             if lm is not None:
-                h, v, _ = self._compute_gaze_ratios(lm, w_px, h_px)
+                h, d, v, _ = self._compute_gaze_ratios(lm, w_px, h_px)
                 hs.append(h)
+                diffs.append(d)
                 vs.append(v)
 
             if display:
@@ -359,11 +388,14 @@ class GazeDetector:
 
         if hs:
             self._h_off = float(np.median(hs)) - 0.5
+            self._diff_off = float(np.median(diffs)) if diffs else 0.0
             self._v_off = float(np.median(vs)) - 0.5
             self.calibrated = True
             self._h_ema = None
+            self._diff_ema = None
             self._v_ema = None
             self._h_history.clear()
+            self._diff_history.clear()
             self._v_history.clear()
             print(
                 f"[Gaze calibration] Done  h_off={self._h_off:.3f}  v_off={self._v_off:.3f}\n"
@@ -393,32 +425,43 @@ class GazeDetector:
 
         self._no_face_streak = 0
 
-        h_raw, v_raw, gaze_debug = self._compute_gaze_ratios(lm, w_px, h_px)
-        h_cal_raw = h_raw - self._h_off
+        h_raw, h_diff, v_raw, gaze_debug = self._compute_gaze_ratios(lm, w_px, h_px)
+        h_avg_cal = h_raw - self._h_off
+        h_diff_cal = h_diff - self._diff_off
         v_cal_raw = v_raw - self._v_off
 
-        h_smooth, v_smooth = self._smooth_ratio(h_cal_raw, v_cal_raw)
-        direction = self._classify_with_hysteresis(h_smooth, v_smooth)
+        h_avg_smooth = self._smooth_scalar(h_avg_cal, "_h_ema", self._h_history)
+        h_diff_smooth = self._smooth_scalar(h_diff_cal, "_diff_ema", self._diff_history)
+        v_smooth = self._smooth_scalar(v_cal_raw, "_v_ema", self._v_history)
+
+        # Fast path for obvious look-away on current frame
+        if abs(h_diff_cal) >= self.SNAP_DIFF:
+            direction = "left" if h_diff_cal > 0 else "right"
+            self._direction = direction
+        else:
+            direction = self._classify_with_hysteresis(
+                h_diff_smooth, h_avg_smooth, v_smooth
+            )
 
         gaze_debug.update(
             {
                 "gazeRawH": round(h_raw, 4),
+                "gazeRawDiff": round(h_diff, 4),
                 "gazeRawV": round(v_raw, 4),
-                "gazeRatio": round(h_smooth, 4),
+                "gazeRatio": round(h_avg_smooth, 4),
+                "gazeDiff": round(h_diff_smooth, 4),
                 "gazeVertical": round(v_smooth, 4),
-                "gazeInstantH": round(h_cal_raw, 4),
+                "gazeInstantDiff": round(h_diff_cal, 4),
                 "classification": direction,
             }
         )
 
         if os.environ.get("LOG_GAZE_DEBUG", "0") == "1":
-            print(
+            _stderr(
                 f"[GAZE] frame={self._frame_n} | "
-                f"L_pupil={gaze_debug['leftPupil']} R_pupil={gaze_debug['rightPupil']} | "
-                f"L_center={gaze_debug['leftEyeCenter']} R_center={gaze_debug['rightEyeCenter']} | "
-                f"ratio instant={h_cal_raw:.3f} smooth={h_smooth:.3f} | "
-                f"class={direction}",
-                flush=True,
+                f"L={gaze_debug['leftRatio']} R={gaze_debug['rightRatio']} "
+                f"diff={h_diff_cal:+.3f} smooth={h_diff_smooth:+.3f} | "
+                f"class={direction}"
             )
 
         now = time.time()
@@ -435,11 +478,13 @@ class GazeDetector:
 
         self._last_gaze = {
             "direction": direction,
-            "h_ratio": h_smooth,
+            "h_ratio": h_avg_smooth,
+            "h_diff": h_diff_smooth,
             "v_ratio": v_smooth,
             "h_raw": h_raw,
             "v_raw": v_raw,
-            "h_instant": h_cal_raw,
+            "h_diff_raw": h_diff,
+            "h_instant_diff": h_diff_cal,
             "alert": alert,
             "debug": gaze_debug,
         }
