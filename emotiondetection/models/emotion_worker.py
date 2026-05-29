@@ -38,6 +38,7 @@ def default_stats():
         "irritatedCount": 0,
         "gazeAlerts": 0,
         "phoneDetections": 0,
+        "paperDetections": 0,   # BUG FIX: was missing, causing frontend to always show 0
         "calibrationFrames": 0,
         "calibrated": False,
         "lastPhoneAt": None,
@@ -113,6 +114,8 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
 
     paper_boxes = _paper.process(frame)
     if paper_boxes:
+        # BUG FIX: increment paperDetections counter (was never incremented before)
+        _stats["paperDetections"] = int(_stats.get("paperDetections", 0)) + 1
         alerts.append("PAPER DETECTED")
         draw_paper_boxes(preview, paper_boxes)
 
@@ -135,15 +138,17 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
             )
             if write_preview:
                 cv2.imwrite(write_preview, preview)
-            return build_response(
-                w_img,
-                h_img,
-                phone_boxes,
-                None,
-                "CALIBRATING",
-                {"direction": "calibrating", "alert": False},
-                alerts,
-            )
+    # BUG FIX: pass paper_boxes to build_response so boxes are included in response
+    return build_response(
+        w_img,
+        h_img,
+        phone_boxes,
+        paper_boxes,
+        None,
+        "CALIBRATING",
+        {"direction": "calibrating", "alert": False},
+        alerts,
+    )
 
     _stats["framesAnalyzed"] = int(_stats.get("framesAnalyzed", 0)) + 1
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -189,10 +194,12 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
     if write_preview:
         cv2.imwrite(write_preview, preview)
 
+    # BUG FIX: pass paper_boxes to build_response so boxes are included in response
     return build_response(
         w_img,
         h_img,
         phone_boxes,
+        paper_boxes,
         face_box,
         emotion_label,
         gaze_result,
@@ -200,20 +207,37 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
     )
 
 
-def build_response(w_img, h_img, phone_boxes, face_box, emotion_label, gaze_result, alerts):
+def build_response(w_img, h_img, phone_boxes, paper_boxes, face_box, emotion_label, gaze_result, alerts):
     gaze_dir = "center"
     gaze_alert = False
     h_ratio = None
     v_ratio = None
+    h_raw = None
+    v_raw = None
     if isinstance(gaze_result, dict):
         gaze_dir = gaze_result.get("direction", "center")
         gaze_alert = bool(gaze_result.get("alert"))
         h_ratio = gaze_result.get("h_ratio")
         v_ratio = gaze_result.get("v_ratio")
+        h_raw   = gaze_result.get("h_raw")
+        v_raw   = gaze_result.get("v_raw")
 
     norm_phones = []
     for b in phone_boxes or []:
         norm_phones.append(
+            {
+                "x1": b["x1"] / w_img,
+                "y1": b["y1"] / h_img,
+                "x2": b["x2"] / w_img,
+                "y2": b["y2"] / h_img,
+                "conf": b.get("conf", 0),
+            }
+        )
+
+    # BUG FIX 4: expose paper boxes in the response so the frontend can draw them
+    norm_papers = []
+    for b in paper_boxes or []:
+        norm_papers.append(
             {
                 "x1": b["x1"] / w_img,
                 "y1": b["y1"] / h_img,
@@ -241,7 +265,10 @@ def build_response(w_img, h_img, phone_boxes, face_box, emotion_label, gaze_resu
             "gazeAlert": gaze_alert,
             "gazeH": h_ratio,
             "gazeV": v_ratio,
+            "gazeHRaw": h_raw,
+            "gazeVRaw": v_raw,
             "phoneBoxes": norm_phones,
+            "paperBoxes": norm_papers,  # BUG FIX 4
             "faceBox": face_norm,
             "alerts": alerts,
         },
@@ -257,6 +284,7 @@ def finalize_summary():
     irritated_ratio = int(_stats.get("irritatedCount", 0)) / emotion_total
     dominant = _stats.get("lastDominantEmotion") or "NEUTRAL"
     phone_frames = int(_stats.get("phoneDetections", 0))
+    paper_frames = int(_stats.get("paperDetections", 0))  # BUG FIX: was missing
     gaze_alerts = int(_stats.get("gazeAlerts", 0))
     frames = int(_stats.get("framesAnalyzed", 0))
 
@@ -275,6 +303,7 @@ def finalize_summary():
         "irritatedRatio": round(irritated_ratio, 3),
         "gazeAlerts": gaze_alerts,
         "phoneDetections": phone_frames,
+        "paperDetections": paper_frames,  # BUG FIX: added to final summary
         "lastGazeDirection": _stats.get("lastGazeDirection", "center"),
         "riskLevel": risk_level,
         "calibrated": bool(_stats.get("calibrated")),

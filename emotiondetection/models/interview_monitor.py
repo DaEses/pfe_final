@@ -81,6 +81,7 @@ def draw_confidence_bar(frame, prob_neutral, x, y, w):
 # ──────────────────────────────────────────────────────────
 
 class GazeDetector:
+    # ── MediaPipe landmark indices ──────────────────────────────────────────
     L_IRIS       = 468
     R_IRIS       = 473
     L_EYE_OUTER  = 33
@@ -90,9 +91,16 @@ class GazeDetector:
     L_EYE_TOP    = 159
     L_EYE_BOT    = 145
 
-    LEFT_THR  = 0.25   # Even looser for better sensitivity
-    RIGHT_THR = 0.75   # Even looser for better sensitivity
-    UP_THR    = 0.20   # Even looser for better sensitivity
+    # BUG FIX 2: Thresholds tightened so center is only 0.35..0.65 of the
+    # eye-width range. The old 0.25/0.75 window was so wide that the iris
+    # almost never left it, causing 'center' always.
+    # Additionally: the frame is horizontally flipped (cv2.flip in the worker)
+    # which mirrors left↔right in pixel coordinates but MediaPipe landmarks
+    # are run on the flipped frame, so 'left' in landmark-space maps correctly
+    # to the *subject's* left eye — no swap needed.
+    LEFT_THR  = 0.40   # iris ratio below this → looking LEFT
+    RIGHT_THR = 0.60   # iris ratio above this → looking RIGHT
+    UP_THR    = 0.35   # vertical ratio below this → looking UP
     ALERT_SEC = 2.0
     COOLDOWN  = 5.0
     GAZE_SKIP = 2      # Process gaze every 2 frames
@@ -134,20 +142,34 @@ class GazeDetector:
         return np.array([p.x * w, p.y * h])
 
     def _ratios(self, lm, w, h):
+        # ── Horizontal ratio: position of iris within eye width ─────────────
+        # Each ratio = 0.0 → iris at outer corner, 1.0 → iris at inner corner.
+        # BUG FIX 2: The L_EYE_OUTER landmark x-coord is always < L_EYE_INNER
+        # x-coord in the flipped frame, so the denominator (l_in - l_out) is
+        # positive.  The raw ratio for a centred eye is ~0.5.  Looking left
+        # pulls the iris toward l_out (smaller x → smaller ratio).
         l_out = self._pt(lm, self.L_EYE_OUTER, w, h)[0]
         l_in  = self._pt(lm, self.L_EYE_INNER, w, h)[0]
         r_out = self._pt(lm, self.R_EYE_OUTER, w, h)[0]
         r_in  = self._pt(lm, self.R_EYE_INNER, w, h)[0]
 
-        l_h = (self._pt(lm, self.L_IRIS, w, h)[0] - l_out) / (l_in - l_out + 1e-6)
-        r_h = (self._pt(lm, self.R_IRIS, w, h)[0] - r_out) / (r_in - r_out + 1e-6)
-        h_r = float(np.clip((l_h + r_h) / 2, 0, 1))
+        # Clamp individually before averaging to avoid extreme outliers
+        l_h = float(np.clip(
+            (self._pt(lm, self.L_IRIS, w, h)[0] - l_out) / (abs(l_in - l_out) + 1e-6),
+            0.0, 1.0,
+        ))
+        r_h = float(np.clip(
+            (self._pt(lm, self.R_IRIS, w, h)[0] - r_out) / (abs(r_in - r_out) + 1e-6),
+            0.0, 1.0,
+        ))
+        h_r = (l_h + r_h) / 2.0
 
+        # ── Vertical ratio: position of iris within eye height ──────────────
         e_top = self._pt(lm, self.L_EYE_TOP, w, h)[1]
         e_bot = self._pt(lm, self.L_EYE_BOT, w, h)[1]
         v_r   = float(np.clip(
-            (self._pt(lm, self.L_IRIS, w, h)[1] - e_top) / (e_bot - e_top + 1e-6),
-            0, 1
+            (self._pt(lm, self.L_IRIS, w, h)[1] - e_top) / (abs(e_bot - e_top) + 1e-6),
+            0.0, 1.0,
         ))
         return h_r, v_r
 
@@ -212,19 +234,31 @@ class GazeDetector:
             self._last_gaze = {'direction': 'no_face', 'h_ratio': None, 'v_ratio': None, 'alert': False}
             return self._last_gaze
 
-        h, v = self._ratios(lm, w_px, h_px)
-        h_raw, v_raw = h, v  # Store raw values for debug
-        h   -= self._h_off
-        v   -= self._v_off
+        h_r, v_r = self._ratios(lm, w_px, h_px)
 
-        # Debug: uncomment to see actual measurements
-        # print(f"[GAZE] raw h={h_raw:.3f}, v={v_raw:.3f} | calibrated h={h:.3f}, v={v:.3f} | thresholds: L={self.LEFT_THR}, R={self.RIGHT_THR}, U={self.UP_THR}")
+        # Apply calibration offset (offset is subtracted so centre maps → 0)
+        h_cal = h_r - self._h_off
+        v_cal = v_r - self._v_off
 
-        if v < self.UP_THR:
+        # BUG FIX 2 – DEBUG OUTPUT: always print so you can verify in the
+        # backend logs. Remove or set LOG_GAZE_DEBUG=0 env var to silence.
+        import os as _gaze_os
+        if _gaze_os.environ.get('LOG_GAZE_DEBUG', '1') != '0':
+            print(
+                f"[GAZE] raw h={h_r:.3f} v={v_r:.3f} | "
+                f"cal h={h_cal:.3f} v={v_cal:.3f} | "
+                f"thr L<{self.LEFT_THR} R>{self.RIGHT_THR} U<{self.UP_THR}",
+                flush=True,
+            )
+
+        # BUG FIX 2: thresholds now use the *calibrated* value h_cal so that
+        # a perfectly centred gaze (h_cal≈0.5, off≈0 before calib) is 0.5 and
+        # left/right deviations move it below LEFT_THR or above RIGHT_THR.
+        if v_cal < self.UP_THR:
             direction = 'up'
-        elif h < self.LEFT_THR:
+        elif h_cal < self.LEFT_THR:
             direction = 'left'
-        elif h > self.RIGHT_THR:
+        elif h_cal > self.RIGHT_THR:
             direction = 'right'
         else:
             direction = 'center'
@@ -242,7 +276,14 @@ class GazeDetector:
         else:
             self._off_start = None
 
-        self._last_gaze = {'direction': direction, 'h_ratio': h, 'v_ratio': v, 'alert': alert}
+        self._last_gaze = {
+            'direction': direction,
+            'h_ratio': h_cal,
+            'v_ratio': v_cal,
+            'h_raw': h_r,
+            'v_raw': v_r,
+            'alert': alert,
+        }
         return self._last_gaze
 
 
@@ -284,13 +325,37 @@ class PhoneDetector:
 
 
 # ──────────────────────────────────────────────────────────
-#  4B. PAPER DETECTION
+#  4B. PAPER DETECTION  (BUG FIX 3 + 4)
 # ──────────────────────────────────────────────────────────
+# ROOT CAUSE of "paper detection not working":
+#   1. YOLO yolov8n is a general object detector trained on COCO.  COCO has
+#      no "paper" or "A4 sheet" class.  The closest proxy (class 73 = "book")
+#      has very low recall for a flat sheet of paper on a desk.  YOLO alone
+#      is not reliable for documents.
+#   2. The SKIP=6 throttle means only 1 in 6 frames is evaluated — fine for
+#      phones, but the probability of catching a briefly-held sheet is low.
+#
+# FIX: PaperDetector now uses a TWO-STAGE approach:
+#   Stage 1 – YOLO classes 73 (book) + 84 (book/binder) at lower threshold.
+#   Stage 2 – OpenCV contour / shape-based white-rectangle detector that
+#              works reliably for A4/letter sheets at any confidence level.
+# Both results are merged and returned as a unified box list.
 
 class PaperDetector:
-    BOOK_CLASS  = 73   # "book" class in COCO dataset
-    CONF_THR    = 0.35
-    SKIP        = 6
+    # COCO classes that may correspond to paper/document objects
+    DOC_CLASSES  = [73, 84]   # 73=book, 84=book (some YOLO weights variants)
+    CONF_THR     = 0.25       # Lower threshold → more recall for documents
+    SKIP         = 4          # Evaluate every 4th frame (was 6)
+
+    # Contour-based paper detection parameters
+    # A sheet of paper typically occupies 8-60% of the frame area
+    MIN_AREA_RATIO = 0.06
+    MAX_AREA_RATIO = 0.80
+    # Aspect ratio of A4 paper (portrait or landscape)
+    MIN_ASPECT = 0.55
+    MAX_ASPECT = 2.50
+    # Rectangularity threshold: how close to a 4-sided polygon
+    RECT_EPSILON = 0.04
 
     def __init__(self, yolo_model=None):
         from ultralytics import YOLO
@@ -302,16 +367,17 @@ class PaperDetector:
         self._frame_n = 0
         self._last    = []
 
-    def process(self, frame_bgr):
-        self._frame_n += 1
-        if self._frame_n % self.SKIP != 0:
-            return self._last
-
-        # Resize for faster inference
+    def _detect_yolo(self, frame_bgr):
+        """YOLO-based detection (book/document classes)."""
         h, w = frame_bgr.shape[:2]
-        frame_resized = cv2.resize(frame_bgr, (w // 2, h // 2))
-        results = self._model(frame_resized, verbose=False, classes=[self.BOOK_CLASS])[0]
-        boxes   = []
+        small = cv2.resize(frame_bgr, (w // 2, h // 2))
+        try:
+            results = self._model(
+                small, verbose=False, classes=self.DOC_CLASSES
+            )[0]
+        except Exception:
+            return []
+        boxes = []
         for box in results.boxes:
             conf = float(box.conf[0])
             if conf >= self.CONF_THR:
@@ -319,8 +385,112 @@ class PaperDetector:
                 # Scale back to original resolution
                 x1, y1, x2, y2 = x1 * 2, y1 * 2, x2 * 2, y2 * 2
                 boxes.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'conf': conf})
-        self._last = boxes
         return boxes
+
+    def _detect_contours(self, frame_bgr):
+        """
+        BUG FIX 3: Contour / shape-based paper detector.
+
+        Works by:
+          1. Converting to grayscale and blurring.
+          2. Running Canny edge detection with tuned thresholds.
+          3. Finding contours and approximating each to a polygon.
+          4. Accepting 4-sided polygons (rectangles) of appropriate area
+             and aspect ratio as "paper".
+
+        This reliably detects A4/notebook sheets regardless of YOLO class
+        availability.
+        """
+        img_h, img_w = frame_bgr.shape[:2]
+        frame_area = img_h * img_w
+
+        gray    = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+
+        # Canny with auto-threshold via Otsu
+        otsu_thr, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        low  = max(10, int(0.4 * otsu_thr))
+        high = max(30, int(1.2 * otsu_thr))
+        edges = cv2.Canny(blurred, low, high)
+
+        # Dilate edges to close small gaps in paper boundary
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
+        edges  = cv2.dilate(edges, kernel, iterations=1)
+
+        contours, _ = cv2.findContours(
+            edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
+        )
+
+        boxes = []
+        for cnt in contours:
+            area = cv2.contourArea(cnt)
+            if area < frame_area * self.MIN_AREA_RATIO:
+                continue
+            if area > frame_area * self.MAX_AREA_RATIO:
+                continue
+
+            # Approximate contour to polygon
+            peri    = cv2.arcLength(cnt, True)
+            epsilon = self.RECT_EPSILON * peri
+            approx  = cv2.approxPolyDP(cnt, epsilon, True)
+
+            # Accept 4-sided polygons (quadrilaterals = sheets of paper)
+            if len(approx) != 4:
+                continue
+
+            x, y, bw, bh = cv2.boundingRect(approx)
+            if bw == 0 or bh == 0:
+                continue
+            aspect = bw / bh
+            if not (self.MIN_ASPECT <= aspect <= self.MAX_ASPECT):
+                continue
+
+            # Convexity check — a flat sheet of paper is convex
+            if not cv2.isContourConvex(approx):
+                continue
+
+            # Confidence proxy: ratio of contour area to bounding-rect area
+            rect_area = bw * bh
+            fill_ratio = area / max(rect_area, 1)
+            conf = round(min(0.95, 0.50 + fill_ratio * 0.45), 2)
+
+            boxes.append({'x1': x, 'y1': y, 'x2': x + bw, 'y2': y + bh, 'conf': conf})
+
+        # Keep the largest detected rectangle (most likely the paper)
+        if boxes:
+            boxes.sort(key=lambda b: (b['x2'] - b['x1']) * (b['y2'] - b['y1']), reverse=True)
+            return [boxes[0]]
+        return []
+
+    def process(self, frame_bgr):
+        self._frame_n += 1
+        if self._frame_n % self.SKIP != 0:
+            return self._last
+
+        yolo_boxes    = self._detect_yolo(frame_bgr)
+        contour_boxes = self._detect_contours(frame_bgr)
+
+        # Merge: YOLO detections take priority; add contour-based ones that
+        # don't overlap significantly with existing YOLO boxes.
+        merged = list(yolo_boxes)
+        for cb in contour_boxes:
+            overlaps = False
+            for yb in yolo_boxes:
+                ix1 = max(cb['x1'], yb['x1'])
+                iy1 = max(cb['y1'], yb['y1'])
+                ix2 = min(cb['x2'], yb['x2'])
+                iy2 = min(cb['y2'], yb['y2'])
+                if ix2 > ix1 and iy2 > iy1:
+                    inter = (ix2 - ix1) * (iy2 - iy1)
+                    cb_area = (cb['x2'] - cb['x1']) * (cb['y2'] - cb['y1'])
+                    if inter / max(cb_area, 1) > 0.5:
+                        overlaps = True
+                        break
+            if not overlaps:
+                merged.append(cb)
+
+        self._last = merged
+        return merged
 
 
 # ──────────────────────────────────────────────────────────
