@@ -4,7 +4,8 @@
 // caused the <video> element to hang. The RAF loop now only draws lightweight
 // detection overlays on a *transparent* canvas sitting on top of the video,
 // instead of re-compositing the full video frame every frame.
-const FRAME_INTERVAL_MS = 3000;
+const FRAME_INTERVAL_MS = 2500;
+const OVERLAY_FPS_MS = 100; // ~10 overlay redraws/s — keeps preview smooth without GPU saturation
 const JPEG_QUALITY = 0.75;
 
 export async function openUserCamera() {
@@ -206,20 +207,17 @@ export function startParallelEmotionUpload({
   };
 
   const intervalId = setInterval(tick, FRAME_INTERVAL_MS);
-
-  // RAF loop: only redraws lightweight detection boxes — does NOT touch
-  // the video element's pixel stream. This keeps the live preview smooth.
-  const rafLoop = () => {
+  const overlayId = setInterval(() => {
     if (!stopped) {
       drawDetectionOverlay(canvasEl, videoEl, lastDetection);
-      requestAnimationFrame(rafLoop);
     }
-  };
-  requestAnimationFrame(rafLoop);
-  tick(); // capture first frame immediately
+  }, OVERLAY_FPS_MS);
+
+  tick();
 
   return () => {
     stopped = true;
     clearInterval(intervalId);
+    clearInterval(overlayId);
   };
 }

@@ -38,13 +38,27 @@ def default_stats():
         "irritatedCount": 0,
         "gazeAlerts": 0,
         "phoneDetections": 0,
-        "paperDetections": 0,   # BUG FIX: was missing, causing frontend to always show 0
+        "paperDetections": 0,
         "calibrationFrames": 0,
         "calibrated": False,
         "lastPhoneAt": None,
+        "lastPaperAt": None,
+        "phoneTimestamps": [],
+        "paperTimestamps": [],
+        "emotionTimeline": [],
         "lastDominantEmotion": "NEUTRAL",
         "lastGazeDirection": "center",
     }
+
+
+def _append_timestamp(stats: dict, key: str, max_items: int = 200):
+    ts = datetime.utcnow().isoformat()
+    items = list(stats.get(key) or [])
+    items.append(ts)
+    if len(items) > max_items:
+        items = items[-max_items:]
+    stats[key] = items
+    return ts
 
 
 def reset_detectors():
@@ -71,7 +85,7 @@ def calibrate_step(frame_bgr):
     lm, w_px, h_px = _gaze._detect(frame_bgr)
     if lm is None:
         return False
-    h, v = _gaze._ratios(lm, w_px, h_px)
+    h, v, _ = _gaze._ratios(lm, w_px, h_px)
     if "calib_h" not in _stats:
         _stats["calib_h"] = []
         _stats["calib_v"] = []
@@ -108,14 +122,14 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
     phone_boxes = _phone.process(frame)
     if phone_boxes:
         _stats["phoneDetections"] = int(_stats.get("phoneDetections", 0)) + 1
-        _stats["lastPhoneAt"] = datetime.utcnow().isoformat()
+        _stats["lastPhoneAt"] = _append_timestamp(_stats, "phoneTimestamps")
         alerts.append("PHONE DETECTED")
         draw_phone_boxes(preview, phone_boxes)
 
     paper_boxes = _paper.process(frame)
     if paper_boxes:
-        # BUG FIX: increment paperDetections counter (was never incremented before)
         _stats["paperDetections"] = int(_stats.get("paperDetections", 0)) + 1
+        _stats["lastPaperAt"] = _append_timestamp(_stats, "paperTimestamps")
         alerts.append("PAPER DETECTED")
         draw_paper_boxes(preview, paper_boxes)
 
@@ -138,17 +152,16 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
             )
             if write_preview:
                 cv2.imwrite(write_preview, preview)
-    # BUG FIX: pass paper_boxes to build_response so boxes are included in response
-    return build_response(
-        w_img,
-        h_img,
-        phone_boxes,
-        paper_boxes,
-        None,
-        "CALIBRATING",
-        {"direction": "calibrating", "alert": False},
-        alerts,
-    )
+            return build_response(
+                w_img,
+                h_img,
+                phone_boxes,
+                paper_boxes,
+                None,
+                "CALIBRATING",
+                {"direction": "calibrating", "alert": False},
+                alerts,
+            )
 
     _stats["framesAnalyzed"] = int(_stats.get("framesAnalyzed", 0)) + 1
     gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
@@ -169,6 +182,16 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
         else:
             _stats["irritatedCount"] = int(_stats.get("irritatedCount", 0)) + 1
             alerts.append("IRRITATED")
+        timeline = list(_stats.get("emotionTimeline") or [])
+        timeline.append(
+            {
+                "at": datetime.utcnow().isoformat(),
+                "emotion": emotion_label,
+            }
+        )
+        if len(timeline) > 300:
+            timeline = timeline[-300:]
+        _stats["emotionTimeline"] = timeline
         cv2.rectangle(preview, (x, y), (x + fw, y + fh), color, 2)
         cv2.putText(
             preview,
@@ -207,6 +230,18 @@ def process_frame_path(image_path: str, write_preview: str | None = None):
     )
 
 
+def gaze_direction_label(direction: str) -> str:
+    mapping = {
+        "left": "Looking Left",
+        "right": "Looking Right",
+        "center": "Looking Center",
+        "up": "Looking Up",
+        "no_face": "No Face",
+        "calibrating": "Calibrating",
+    }
+    return mapping.get(direction or "center", direction or "Looking Center")
+
+
 def build_response(w_img, h_img, phone_boxes, paper_boxes, face_box, emotion_label, gaze_result, alerts):
     gaze_dir = "center"
     gaze_alert = False
@@ -214,6 +249,7 @@ def build_response(w_img, h_img, phone_boxes, paper_boxes, face_box, emotion_lab
     v_ratio = None
     h_raw = None
     v_raw = None
+    gaze_debug = None
     if isinstance(gaze_result, dict):
         gaze_dir = gaze_result.get("direction", "center")
         gaze_alert = bool(gaze_result.get("alert"))
@@ -221,6 +257,7 @@ def build_response(w_img, h_img, phone_boxes, paper_boxes, face_box, emotion_lab
         v_ratio = gaze_result.get("v_ratio")
         h_raw   = gaze_result.get("h_raw")
         v_raw   = gaze_result.get("v_raw")
+        gaze_debug = gaze_result.get("debug")
 
     norm_phones = []
     for b in phone_boxes or []:
@@ -262,13 +299,15 @@ def build_response(w_img, h_img, phone_boxes, paper_boxes, face_box, emotion_lab
         "detection": {
             "emotion": emotion_label,
             "gaze": gaze_dir,
+            "gazeLabel": gaze_direction_label(gaze_dir),
             "gazeAlert": gaze_alert,
             "gazeH": h_ratio,
             "gazeV": v_ratio,
             "gazeHRaw": h_raw,
             "gazeVRaw": v_raw,
+            "gazeDebug": gaze_debug,
             "phoneBoxes": norm_phones,
-            "paperBoxes": norm_papers,  # BUG FIX 4
+            "paperBoxes": norm_papers,
             "faceBox": face_norm,
             "alerts": alerts,
         },
@@ -294,6 +333,12 @@ def finalize_summary():
     elif irritated_ratio > 0.25 or gaze_alerts > 2 or phone_frames > 0:
         risk_level = "medium"
 
+    timeline = list(_stats.get("emotionTimeline") or [])
+    emotion_counts = {
+        "NEUTRAL": int(_stats.get("neutralCount", 0)),
+        "IRRITATED": int(_stats.get("irritatedCount", 0)),
+    }
+
     return {
         "generatedAt": datetime.utcnow().isoformat(),
         "source": "python_interview_monitor",
@@ -301,10 +346,17 @@ def finalize_summary():
         "dominantEmotion": dominant,
         "neutralRatio": round(neutral_ratio, 3),
         "irritatedRatio": round(irritated_ratio, 3),
+        "emotionCounts": emotion_counts,
+        "emotionTimeline": timeline[-120:],
         "gazeAlerts": gaze_alerts,
         "phoneDetections": phone_frames,
-        "paperDetections": paper_frames,  # BUG FIX: added to final summary
+        "paperDetections": paper_frames,
+        "lastPhoneAt": _stats.get("lastPhoneAt"),
+        "lastPaperAt": _stats.get("lastPaperAt"),
+        "phoneTimestamps": list(_stats.get("phoneTimestamps") or [])[-120:],
+        "paperTimestamps": list(_stats.get("paperTimestamps") or [])[-120:],
         "lastGazeDirection": _stats.get("lastGazeDirection", "center"),
+        "lastGazeLabel": gaze_direction_label(_stats.get("lastGazeDirection", "center")),
         "riskLevel": risk_level,
         "calibrated": bool(_stats.get("calibrated")),
     }

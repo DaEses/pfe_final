@@ -36,6 +36,21 @@
   border-bottom: 1px solid var(--border);
 }
 
+.timestamp-list {
+  margin: 12px 0 0;
+  padding-left: 20px;
+  font-size: 13px;
+  color: #374151;
+}
+
+.timestamp-list li {
+  margin-bottom: 4px;
+}
+
+.timeline-block {
+  margin-top: 16px;
+}
+
 .report-note {
   font-size: 0.875rem;
   color: var(--text-muted);

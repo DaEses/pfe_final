@@ -599,6 +599,7 @@ export class InterviewService {
       this.emotionLiveState.get(interviewId) ?? {
         framesAnalyzed: 0,
         phoneDetections: 0,
+        paperDetections: 0,
         gazeAlerts: 0,
         calibrated: false,
       }
@@ -981,13 +982,24 @@ export class InterviewService {
       fraudWarning += ` [ALERT] Excessive gaze deviation (${gazeAlerts} alerts).`;
     }
 
+    const dominant = emotionJson.dominantEmotion ?? emotionJson.lastDominantEmotion ?? 'N/A';
+    const neutralPct =
+      emotionJson.neutralRatio != null
+        ? `${Math.round(Number(emotionJson.neutralRatio) * 100)}%`
+        : 'n/a';
+    const irritatedPct =
+      emotionJson.irritatedRatio != null
+        ? `${Math.round(Number(emotionJson.irritatedRatio) * 100)}%`
+        : 'n/a';
+    const monitoringSummary = ` Emotion: dominant ${dominant} (neutral ${neutralPct}, irritated ${irritatedPct}). Phone: ${phones} detection(s). Paper: ${papers} detection(s). Gaze alerts: ${gazeAlerts}.`;
+
     const recommendation = `Overall score: ${score}/10 (65% written answers, 35% presence). ${answerPreview}. ${
       score >= 7
         ? 'Strong candidate — recommend moving forward.'
         : score >= 5
           ? 'Moderate performance — HR review recommended.'
           : 'Below expectations — consider follow-up or rejection.'
-    }${fraudWarning}`;
+    }${monitoringSummary}${fraudWarning}`;
 
     let report = await this.reportRepository.findOne({
       where: { interviewId: interview.id },

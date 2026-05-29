@@ -91,16 +91,10 @@ class GazeDetector:
     L_EYE_TOP    = 159
     L_EYE_BOT    = 145
 
-    # BUG FIX 2: Thresholds tightened so center is only 0.35..0.65 of the
-    # eye-width range. The old 0.25/0.75 window was so wide that the iris
-    # almost never left it, causing 'center' always.
-    # Additionally: the frame is horizontally flipped (cv2.flip in the worker)
-    # which mirrors left↔right in pixel coordinates but MediaPipe landmarks
-    # are run on the flipped frame, so 'left' in landmark-space maps correctly
-    # to the *subject's* left eye — no swap needed.
-    LEFT_THR  = 0.40   # iris ratio below this → looking LEFT
-    RIGHT_THR = 0.60   # iris ratio above this → looking RIGHT
-    UP_THR    = 0.35   # vertical ratio below this → looking UP
+    # Calibrated horizontal ratio near 0.5 = center. Narrow band so left/right register.
+    LEFT_THR  = 0.44   # below → looking LEFT (subject's left)
+    RIGHT_THR = 0.56   # above → looking RIGHT
+    UP_THR    = 0.38   # below → looking UP
     ALERT_SEC = 2.0
     COOLDOWN  = 5.0
     GAZE_SKIP = 2      # Process gaze every 2 frames
@@ -142,36 +136,37 @@ class GazeDetector:
         return np.array([p.x * w, p.y * h])
 
     def _ratios(self, lm, w, h):
-        # ── Horizontal ratio: position of iris within eye width ─────────────
-        # Each ratio = 0.0 → iris at outer corner, 1.0 → iris at inner corner.
-        # BUG FIX 2: The L_EYE_OUTER landmark x-coord is always < L_EYE_INNER
-        # x-coord in the flipped frame, so the denominator (l_in - l_out) is
-        # positive.  The raw ratio for a centred eye is ~0.5.  Looking left
-        # pulls the iris toward l_out (smaller x → smaller ratio).
-        l_out = self._pt(lm, self.L_EYE_OUTER, w, h)[0]
-        l_in  = self._pt(lm, self.L_EYE_INNER, w, h)[0]
-        r_out = self._pt(lm, self.R_EYE_OUTER, w, h)[0]
-        r_in  = self._pt(lm, self.R_EYE_INNER, w, h)[0]
+        """Iris position within each eye (0=outer corner, 1=inner corner)."""
+        l_out = self._pt(lm, self.L_EYE_OUTER, w, h)
+        l_in  = self._pt(lm, self.L_EYE_INNER, w, h)
+        r_out = self._pt(lm, self.R_EYE_OUTER, w, h)
+        r_in  = self._pt(lm, self.R_EYE_INNER, w, h)
+        l_iris = self._pt(lm, self.L_IRIS, w, h)
+        r_iris = self._pt(lm, self.R_IRIS, w, h)
 
-        # Clamp individually before averaging to avoid extreme outliers
-        l_h = float(np.clip(
-            (self._pt(lm, self.L_IRIS, w, h)[0] - l_out) / (abs(l_in - l_out) + 1e-6),
-            0.0, 1.0,
-        ))
-        r_h = float(np.clip(
-            (self._pt(lm, self.R_IRIS, w, h)[0] - r_out) / (abs(r_in - r_out) + 1e-6),
-            0.0, 1.0,
-        ))
+        l_span = max(abs(l_in[0] - l_out[0]), 1e-6)
+        r_span = max(abs(r_in[0] - r_out[0]), 1e-6)
+        l_h = float(np.clip((l_iris[0] - l_out[0]) / l_span, 0.0, 1.0))
+        r_h = float(np.clip((r_iris[0] - r_out[0]) / r_span, 0.0, 1.0))
         h_r = (l_h + r_h) / 2.0
 
-        # ── Vertical ratio: position of iris within eye height ──────────────
         e_top = self._pt(lm, self.L_EYE_TOP, w, h)[1]
         e_bot = self._pt(lm, self.L_EYE_BOT, w, h)[1]
-        v_r   = float(np.clip(
-            (self._pt(lm, self.L_IRIS, w, h)[1] - e_top) / (abs(e_bot - e_top) + 1e-6),
+        v_r = float(np.clip(
+            (l_iris[1] - e_top) / (max(abs(e_bot - e_top), 1e-6)),
             0.0, 1.0,
         ))
-        return h_r, v_r
+        debug = {
+            "leftEyeOuter": l_out.tolist(),
+            "leftEyeInner": l_in.tolist(),
+            "rightEyeOuter": r_out.tolist(),
+            "rightEyeInner": r_in.tolist(),
+            "leftPupil": l_iris.tolist(),
+            "rightPupil": r_iris.tolist(),
+            "leftRatio": round(l_h, 3),
+            "rightRatio": round(r_h, 3),
+        }
+        return h_r, v_r, debug
 
     def _detect(self, frame_bgr):
         h_px, w_px = frame_bgr.shape[:2]
@@ -198,8 +193,9 @@ class GazeDetector:
             if frame_skip % 5 == 0:
                 lm, w_px, h_px = self._detect(frame)
                 if lm is not None:
-                    h, v = self._ratios(lm, w_px, h_px)
-                    hs.append(h); vs.append(v)
+                    h, v, _ = self._ratios(lm, w_px, h_px)
+                    hs.append(h)
+                    vs.append(v)
 
             if display:
                 rem = max(0, 5 - int(time.time() - t0))
@@ -234,34 +230,30 @@ class GazeDetector:
             self._last_gaze = {'direction': 'no_face', 'h_ratio': None, 'v_ratio': None, 'alert': False}
             return self._last_gaze
 
-        h_r, v_r = self._ratios(lm, w_px, h_px)
-
-        # Apply calibration offset (offset is subtracted so centre maps → 0)
+        h_r, v_r, gaze_debug = self._ratios(lm, w_px, h_px)
         h_cal = h_r - self._h_off
         v_cal = v_r - self._v_off
+        gaze_debug["gazeRatio"] = round(h_cal, 3)
+        gaze_debug["gazeVertical"] = round(v_cal, 3)
+        gaze_debug["gazeRawH"] = round(h_r, 3)
+        gaze_debug["gazeRawV"] = round(v_r, 3)
 
-        # BUG FIX 2 – DEBUG OUTPUT: always print so you can verify in the
-        # backend logs. Remove or set LOG_GAZE_DEBUG=0 env var to silence.
-        import os as _gaze_os
-        if _gaze_os.environ.get('LOG_GAZE_DEBUG', '1') != '0':
+        if os.environ.get("LOG_GAZE_DEBUG", "0") == "1":
             print(
-                f"[GAZE] raw h={h_r:.3f} v={v_r:.3f} | "
-                f"cal h={h_cal:.3f} v={v_cal:.3f} | "
-                f"thr L<{self.LEFT_THR} R>{self.RIGHT_THR} U<{self.UP_THR}",
+                f"[GAZE] pupil L={gaze_debug['leftPupil']} R={gaze_debug['rightPupil']} | "
+                f"ratio h={h_cal:.3f} (raw {h_r:.3f}) v={v_cal:.3f} | "
+                f"thr L<{self.LEFT_THR} R>{self.RIGHT_THR}",
                 flush=True,
             )
 
-        # BUG FIX 2: thresholds now use the *calibrated* value h_cal so that
-        # a perfectly centred gaze (h_cal≈0.5, off≈0 before calib) is 0.5 and
-        # left/right deviations move it below LEFT_THR or above RIGHT_THR.
         if v_cal < self.UP_THR:
-            direction = 'up'
+            direction = "up"
         elif h_cal < self.LEFT_THR:
-            direction = 'left'
+            direction = "left"
         elif h_cal > self.RIGHT_THR:
-            direction = 'right'
+            direction = "right"
         else:
-            direction = 'center'
+            direction = "center"
 
         now   = time.time()
         alert = False
@@ -277,12 +269,13 @@ class GazeDetector:
             self._off_start = None
 
         self._last_gaze = {
-            'direction': direction,
-            'h_ratio': h_cal,
-            'v_ratio': v_cal,
-            'h_raw': h_r,
-            'v_raw': v_r,
-            'alert': alert,
+            "direction": direction,
+            "h_ratio": h_cal,
+            "v_ratio": v_cal,
+            "h_raw": h_r,
+            "v_raw": v_r,
+            "alert": alert,
+            "debug": gaze_debug,
         }
         return self._last_gaze
 
@@ -342,15 +335,12 @@ class PhoneDetector:
 # Both results are merged and returned as a unified box list.
 
 class PaperDetector:
-    # COCO classes that may correspond to paper/document objects
-    DOC_CLASSES  = [73, 84]   # 73=book, 84=book (some YOLO weights variants)
-    CONF_THR     = 0.25       # Lower threshold → more recall for documents
-    SKIP         = 4          # Evaluate every 4th frame (was 6)
+    DOC_CLASSES  = [73]       # COCO "book" — closest proxy for documents
+    CONF_THR     = 0.22
+    SKIP         = 3
 
-    # Contour-based paper detection parameters
-    # A sheet of paper typically occupies 8-60% of the frame area
-    MIN_AREA_RATIO = 0.06
-    MAX_AREA_RATIO = 0.80
+    MIN_AREA_RATIO = 0.025
+    MAX_AREA_RATIO = 0.85
     # Aspect ratio of A4 paper (portrait or landscape)
     MIN_ASPECT = 0.55
     MAX_ASPECT = 2.50
@@ -387,78 +377,55 @@ class PaperDetector:
                 boxes.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'conf': conf})
         return boxes
 
-    def _detect_contours(self, frame_bgr):
-        """
-        BUG FIX 3: Contour / shape-based paper detector.
-
-        Works by:
-          1. Converting to grayscale and blurring.
-          2. Running Canny edge detection with tuned thresholds.
-          3. Finding contours and approximating each to a polygon.
-          4. Accepting 4-sided polygons (rectangles) of appropriate area
-             and aspect ratio as "paper".
-
-        This reliably detects A4/notebook sheets regardless of YOLO class
-        availability.
-        """
-        img_h, img_w = frame_bgr.shape[:2]
-        frame_area = img_h * img_w
-
-        gray    = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
-        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
-
-        # Canny with auto-threshold via Otsu
-        otsu_thr, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
-        low  = max(10, int(0.4 * otsu_thr))
-        high = max(30, int(1.2 * otsu_thr))
-        edges = cv2.Canny(blurred, low, high)
-
-        # Dilate edges to close small gaps in paper boundary
-        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3))
-        edges  = cv2.dilate(edges, kernel, iterations=1)
-
-        contours, _ = cv2.findContours(
-            edges, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE
-        )
-
+    def _quads_from_mask(self, mask, frame_area):
+        kernel = cv2.getStructuringElement(cv2.MORPH_RECT, (5, 5))
+        mask = cv2.morphologyEx(mask, cv2.MORPH_CLOSE, kernel, iterations=2)
+        contours, _ = cv2.findContours(mask, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
         boxes = []
         for cnt in contours:
             area = cv2.contourArea(cnt)
-            if area < frame_area * self.MIN_AREA_RATIO:
+            if area < frame_area * self.MIN_AREA_RATIO or area > frame_area * self.MAX_AREA_RATIO:
                 continue
-            if area > frame_area * self.MAX_AREA_RATIO:
+            peri = cv2.arcLength(cnt, True)
+            approx = cv2.approxPolyDP(cnt, self.RECT_EPSILON * peri, True)
+            if len(approx) < 4 or len(approx) > 6:
                 continue
-
-            # Approximate contour to polygon
-            peri    = cv2.arcLength(cnt, True)
-            epsilon = self.RECT_EPSILON * peri
-            approx  = cv2.approxPolyDP(cnt, epsilon, True)
-
-            # Accept 4-sided polygons (quadrilaterals = sheets of paper)
-            if len(approx) != 4:
-                continue
-
             x, y, bw, bh = cv2.boundingRect(approx)
-            if bw == 0 or bh == 0:
+            if bw < 40 or bh < 40:
                 continue
-            aspect = bw / bh
+            aspect = bw / float(bh)
             if not (self.MIN_ASPECT <= aspect <= self.MAX_ASPECT):
                 continue
-
-            # Convexity check — a flat sheet of paper is convex
-            if not cv2.isContourConvex(approx):
-                continue
-
-            # Confidence proxy: ratio of contour area to bounding-rect area
             rect_area = bw * bh
             fill_ratio = area / max(rect_area, 1)
-            conf = round(min(0.95, 0.50 + fill_ratio * 0.45), 2)
+            conf = round(min(0.95, 0.45 + fill_ratio * 0.5), 2)
+            boxes.append({"x1": x, "y1": y, "x2": x + bw, "y2": y + bh, "conf": conf})
+        return boxes
 
-            boxes.append({'x1': x, 'y1': y, 'x2': x + bw, 'y2': y + bh, 'conf': conf})
+    def _detect_contours(self, frame_bgr):
+        """Edge + bright-region detectors for A4 / notebook sheets."""
+        img_h, img_w = frame_bgr.shape[:2]
+        frame_area = img_h * img_w
+        boxes = []
 
-        # Keep the largest detected rectangle (most likely the paper)
+        gray = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2GRAY)
+        blurred = cv2.GaussianBlur(gray, (5, 5), 0)
+        otsu_thr, _ = cv2.threshold(blurred, 0, 255, cv2.THRESH_BINARY + cv2.THRESH_OTSU)
+        low = max(20, int(0.35 * otsu_thr))
+        high = max(60, int(1.0 * otsu_thr))
+        edges = cv2.Canny(blurred, low, high)
+        edges = cv2.dilate(edges, cv2.getStructuringElement(cv2.MORPH_RECT, (3, 3)), 1)
+        boxes.extend(self._quads_from_mask(edges, frame_area))
+
+        hsv = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2HSV)
+        white_mask = cv2.inRange(hsv, (0, 0, 145), (180, 70, 255))
+        boxes.extend(self._quads_from_mask(white_mask, frame_area))
+
+        if os.environ.get("LOG_PAPER_DEBUG", "0") == "1":
+            print(f"[PAPER] contour candidates: {len(boxes)}", flush=True)
+
         if boxes:
-            boxes.sort(key=lambda b: (b['x2'] - b['x1']) * (b['y2'] - b['y1']), reverse=True)
+            boxes.sort(key=lambda b: (b["x2"] - b["x1"]) * (b["y2"] - b["y1"]), reverse=True)
             return [boxes[0]]
         return []
 
@@ -529,7 +496,7 @@ def draw_phone_boxes(frame, phone_boxes):
 def draw_paper_boxes(frame, paper_boxes):
     for b in paper_boxes:
         cv2.rectangle(frame, (b['x1'], b['y1']), (b['x2'], b['y2']), COLOR_PAPER, 3)
-        label = f"PAPER {b['conf']*100:.0f}%"
+        label = f"Paper Detected {b['conf']*100:.0f}%"
         (tw, th), _ = cv2.getTextSize(label, FONT, 0.7, 2)
         cv2.rectangle(frame,
                       (b['x1'], b['y1'] - th - 10),
@@ -548,9 +515,17 @@ def draw_status_bar(frame, gaze, phone_boxes, paper_boxes, emotion_label):
     em_col = COLOR_NEUTRAL if emotion_label == 'NEUTRAL' else COLOR_IRRITATED
     cv2.putText(frame, f"EMO: {emotion_label}", (14, 34), FONT, 0.65, em_col, 2)
 
-    gdir  = gaze['direction'].upper()
-    g_col = COLOR_GAZE_OK if gdir == 'CENTER' else COLOR_GAZE_BAD
-    g_lbl = f"GAZE: {gdir}" + ("  !!" if gaze['alert'] else "")
+    gaze_labels = {
+        "left": "Looking Left",
+        "right": "Looking Right",
+        "center": "Looking Center",
+        "up": "Looking Up",
+        "no_face": "No Face",
+    }
+    gdir = gaze.get("direction", "center")
+    g_lbl = gaze_labels.get(gdir, gdir.upper())
+    g_col = COLOR_GAZE_OK if gdir == "center" else COLOR_GAZE_BAD
+    g_lbl = f"GAZE: {g_lbl}" + ("  !!" if gaze["alert"] else "")
     (tw, _), _ = cv2.getTextSize(g_lbl, FONT, 0.65, 2)
     cv2.putText(frame, g_lbl, (w // 2 - tw // 2, 34), FONT, 0.65, g_col, 2)
 

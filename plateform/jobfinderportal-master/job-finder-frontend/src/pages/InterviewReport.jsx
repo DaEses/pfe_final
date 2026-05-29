@@ -141,74 +141,144 @@ function InterviewReport() {
       </div>
 
       {Object.keys(emotion).length > 0 && (
-        <div className="report-card">
-          <h3>Emotion & Behavior Analysis</h3>
-          <div className="emotion-grid">
-            {emotion.dominantEmotion && (
-              <div className="emotion-stat">
-                <p className="emotion-stat-label">Dominant Emotion</p>
-                <p className="emotion-stat-value">{emotion.dominantEmotion}</p>
-              </div>
-            )}
-            {emotion.neutralRatio !== undefined && (
-              <div className="emotion-stat">
-                <p className="emotion-stat-label">Neutral</p>
-                <p className="emotion-stat-value">
-                  {Math.round(emotion.neutralRatio * 100)}%
-                </p>
-              </div>
-            )}
-            {emotion.irritatedRatio !== undefined && (
-              <div className="emotion-stat">
-                <p className="emotion-stat-label">Irritated</p>
-                <p className="emotion-stat-value">
-                  {Math.round(emotion.irritatedRatio * 100)}%
-                </p>
-              </div>
-            )}
-            {emotion.lastGazeDirection && (
-              <div className="emotion-stat">
-                <p className="emotion-stat-label">Last Gaze</p>
-                <p className="emotion-stat-value">
-                  {String(emotion.lastGazeDirection).toUpperCase()}
-                </p>
-              </div>
-            )}
-            {emotion.gazeAlerts !== undefined && (
-              <div className="emotion-stat">
-                <p className="emotion-stat-label">Gaze Alerts</p>
-                <p className="emotion-stat-value">{emotion.gazeAlerts}</p>
-              </div>
-            )}
-            {emotion.phoneDetections !== undefined && (
-              <div className="emotion-stat">
-                <p className="emotion-stat-label">Phone Detections</p>
-                <p
-                  className={`emotion-stat-value ${
-                    emotion.phoneDetections > 0 ? 'risk-high' : 'risk-low'
-                  }`}
-                >
-                  {emotion.phoneDetections}
-                  {emotion.phoneDetections > 0 ? ' — flagged' : ''}
-                </p>
-              </div>
-            )}
-            {emotion.source && (
-              <div className="emotion-stat">
-                <p className="emotion-stat-label">Analysis engine</p>
-                <p className="emotion-stat-value">{String(emotion.source)}</p>
-              </div>
-            )}
-            {emotion.riskLevel && (
-              <div className="emotion-stat">
-                <p className="emotion-stat-label">Risk Level</p>
-                <p className={`emotion-stat-value ${riskClass}`}>
-                  {emotion.riskLevel.toUpperCase()}
-                </p>
+        <>
+          <div className="report-card">
+            <h3>Emotion Analysis</h3>
+            <div className="emotion-grid">
+              {emotion.dominantEmotion && (
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Dominant Emotion</p>
+                  <p className="emotion-stat-value">{emotion.dominantEmotion}</p>
+                </div>
+              )}
+              {emotion.neutralRatio !== undefined && (
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Neutral</p>
+                  <p className="emotion-stat-value">
+                    {Math.round(emotion.neutralRatio * 100)}%
+                  </p>
+                </div>
+              )}
+              {emotion.irritatedRatio !== undefined && (
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Irritated</p>
+                  <p className="emotion-stat-value">
+                    {Math.round(emotion.irritatedRatio * 100)}%
+                  </p>
+                </div>
+              )}
+              {emotion.framesAnalyzed !== undefined && (
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Frames Analyzed</p>
+                  <p className="emotion-stat-value">{emotion.framesAnalyzed}</p>
+                </div>
+              )}
+              {emotion.emotionCounts && (
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Emotion Counts</p>
+                  <p className="emotion-stat-value">
+                    Neutral: {emotion.emotionCounts.NEUTRAL ?? 0} · Irritated:{' '}
+                    {emotion.emotionCounts.IRRITATED ?? 0}
+                  </p>
+                </div>
+              )}
+              {emotion.lastGazeLabel && (
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Last Gaze</p>
+                  <p className="emotion-stat-value">{emotion.lastGazeLabel}</p>
+                </div>
+              )}
+              {emotion.gazeAlerts !== undefined && (
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Gaze Alerts</p>
+                  <p className="emotion-stat-value">{emotion.gazeAlerts}</p>
+                </div>
+              )}
+              {emotion.riskLevel && (
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Risk Level</p>
+                  <p className={`emotion-stat-value ${riskClass}`}>
+                    {emotion.riskLevel.toUpperCase()}
+                  </p>
+                </div>
+              )}
+            </div>
+            {Array.isArray(emotion.emotionTimeline) && emotion.emotionTimeline.length > 0 && (
+              <div className="timeline-block">
+                <p className="report-note">Emotion timeline (recent samples)</p>
+                <ul className="timestamp-list">
+                  {emotion.emotionTimeline.slice(-12).map((item, idx) => (
+                    <li key={`emo-${idx}`}>
+                      {item.at ? new Date(item.at).toLocaleString() : '—'} — {item.emotion}
+                    </li>
+                  ))}
+                </ul>
               </div>
             )}
           </div>
-        </div>
+
+          <div className="report-card">
+            <h3>Phone Detection</h3>
+            <div className="emotion-grid">
+              <div className="emotion-stat">
+                <p className="emotion-stat-label">Total Detections</p>
+                <p
+                  className={`emotion-stat-value ${
+                    (emotion.phoneDetections ?? 0) > 0 ? 'risk-high' : 'risk-low'
+                  }`}
+                >
+                  {emotion.phoneDetections ?? 0}
+                </p>
+              </div>
+              {emotion.lastPhoneAt && (
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Last Detected</p>
+                  <p className="emotion-stat-value">
+                    {new Date(emotion.lastPhoneAt).toLocaleString()}
+                  </p>
+                </div>
+              )}
+            </div>
+            {Array.isArray(emotion.phoneTimestamps) && emotion.phoneTimestamps.length > 0 && (
+              <ul className="timestamp-list">
+                {emotion.phoneTimestamps.slice(-10).map((ts, idx) => (
+                  <li key={`phone-${idx}`}>{new Date(ts).toLocaleString()}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+
+          <div className="report-card">
+            <h3>Paper / Document Detection</h3>
+            <div className="emotion-grid">
+              <div className="emotion-stat">
+                <p className="emotion-stat-label">Total Detections</p>
+                <p
+                  className={`emotion-stat-value ${
+                    (emotion.paperDetections ?? 0) > 0 ? 'risk-high' : 'risk-low'
+                  }`}
+                >
+                  {emotion.paperDetections ?? 0}
+                </p>
+              </div>
+              {emotion.lastPaperAt && (
+                <div className="emotion-stat">
+                  <p className="emotion-stat-label">Last Detected</p>
+                  <p className="emotion-stat-value">
+                    {new Date(emotion.lastPaperAt).toLocaleString()}
+                  </p>
+                </div>
+              )}
+            </div>
+            {Array.isArray(emotion.paperTimestamps) && emotion.paperTimestamps.length > 0 && (
+              <ul className="timestamp-list">
+                {emotion.paperTimestamps.slice(-10).map((ts, idx) => (
+                  <li key={`paper-${idx}`}>{new Date(ts).toLocaleString()}</li>
+                ))}
+              </ul>
+            )}
+          </div>
+        </>
       )}
     </div>
   );

@@ -26,14 +26,15 @@ function CandidateInterview() {
   const [monitor, setMonitor] = useState({
     framesAnalyzed: 0,
     phoneDetections: 0,
+    paperDetections: 0,
     gazeAlerts: 0,
     lastDominantEmotion: 'NEUTRAL',
     calibrated: false,
     alerts: [],
     gaze: 'center',
+    gazeLabel: 'Looking Center',
     calibrationFrames: 0,
   });
-  const [monitorPreview, setMonitorPreview] = useState('');
   const [cameraError, setCameraError] = useState('');
   const [doneResult, setDoneResult] = useState(null);
 
@@ -115,20 +116,28 @@ function CandidateInterview() {
           apiRequest,
           onStatus: (data) => {
             const det = data.detection || {};
-            if (data.previewBase64) {
-              setMonitorPreview(`data:image/jpeg;base64,${data.previewBase64}`);
-            }
+            const gazeDir = det.gaze ?? data.lastGazeDirection ?? 'center';
+            const gazeLabels = {
+              left: 'Looking Left',
+              right: 'Looking Right',
+              center: 'Looking Center',
+              up: 'Looking Up',
+              calibrating: 'Calibrating',
+              no_face: 'No Face',
+            };
             setMonitor((prev) => ({
               ...prev,
               framesAnalyzed: data.framesAnalyzed ?? prev.framesAnalyzed,
               phoneDetections: data.phoneDetections ?? prev.phoneDetections,
+              paperDetections: data.paperDetections ?? prev.paperDetections,
               gazeAlerts: data.gazeAlerts ?? prev.gazeAlerts,
               lastDominantEmotion:
                 data.lastDominantEmotion ?? det.emotion ?? prev.lastDominantEmotion,
               calibrated: data.calibrated ?? prev.calibrated,
               calibrationFrames:
                 data.calibrationFrames ?? prev.calibrationFrames,
-              gaze: det.gaze ?? data.lastGazeDirection ?? prev.gaze,
+              gaze: gazeDir,
+              gazeLabel: det.gazeLabel ?? gazeLabels[gazeDir] ?? prev.gazeLabel,
               alerts: det.alerts ?? prev.alerts,
             }));
           },
@@ -526,11 +535,7 @@ function CandidateInterview() {
           <p className="monitor-title">Live monitoring</p>
           <div className="monitor-video-wrap">
             <video ref={videoRef} className="monitor-video" playsInline muted autoPlay />
-            {monitorPreview ? (
-              <img src={monitorPreview} alt="Analysis" className="monitor-overlay" />
-            ) : (
-              <canvas ref={overlayRef} className="monitor-overlay" />
-            )}
+            <canvas ref={overlayRef} className="monitor-overlay" />
             <span className={`monitor-live ${cameraError ? 'off' : ''}`}>
               {cameraError ? 'Camera off' : 'REC'}
             </span>
@@ -550,7 +555,7 @@ function CandidateInterview() {
             <li>
               <span>Gaze</span>
               <strong className={monitor.gaze !== 'center' ? 'stat-warn' : ''}>
-                {String(monitor.gaze).toUpperCase()}
+                {monitor.gazeLabel || 'Looking Center'}
               </strong>
             </li>
             <li>
