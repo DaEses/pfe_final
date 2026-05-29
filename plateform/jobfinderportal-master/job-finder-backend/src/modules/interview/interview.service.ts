@@ -492,6 +492,11 @@ export class InterviewService {
       env: {
         ...process.env,
         PYTHONUNBUFFERED: '1',
+        // Worker receives discrete JPEGs (~2.5s apart), not a 30fps stream.
+        GAZE_VIDEO_MODE: '0',
+        PHONE_SKIP: '1',
+        PAPER_SKIP: '1',
+        PIPELINE_DEBUG: process.env.PIPELINE_DEBUG ?? '0',
       },
     });
 
@@ -522,10 +527,10 @@ export class InterviewService {
     });
 
     proc.stderr?.on('data', (chunk: Buffer) => {
-      const text = chunk.toString();
-      if (text.includes('ready') || text.includes('Loading')) {
-        this.logger.log(`[emotion ${interviewId}] ${text.trim()}`);
-      }
+      const text = chunk.toString().trim();
+      if (!text) return;
+      const level = text.includes('FAILED') || text.includes('ERROR') ? 'warn' : 'log';
+      this.logger[level](`[emotion ${interviewId}] ${text}`);
     });
 
     proc.on('exit', () => {
@@ -673,6 +678,10 @@ export class InterviewService {
         120_000,
       );
 
+      if (result.ok === false) {
+        throw new Error(String(result.error ?? 'Worker frame processing failed'));
+      }
+
       const stats = (result.stats ?? {}) as Record<string, unknown>;
       const detection = result.detection as Record<string, unknown> | undefined;
       let previewBase64: string | undefined;
@@ -684,6 +693,7 @@ export class InterviewService {
         ...stats,
         detection,
         previewBase64,
+        ok: true,
       };
       this.emotionLiveState.set(interviewId, live);
       fs.writeFileSync(

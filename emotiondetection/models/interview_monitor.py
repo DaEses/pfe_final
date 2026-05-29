@@ -26,12 +26,25 @@ EMOTION_MODEL = os.environ.get(
     os.path.join(SCRIPT_DIR, "binary_emotion_model.h5"),
 )
 
+def _stderr(msg: str) -> None:
+    """All diagnostic logs MUST use stderr — stdout is reserved for JSON worker protocol."""
+    sys.stderr.write(msg + "\n")
+    sys.stderr.flush()
+
+
+def _env_int(name: str, default: int) -> int:
+    try:
+        return int(os.environ.get(name, str(default)))
+    except ValueError:
+        return default
+
+
 if not os.path.exists(EMOTION_MODEL):
-    print(f"ERROR: emotion model not found at: {EMOTION_MODEL}")
-    print("Set EMOTION_MODEL_PATH or place the .h5 file next to this script.")
+    _stderr(f"ERROR: emotion model not found at: {EMOTION_MODEL}")
+    _stderr("Set EMOTION_MODEL_PATH or place the .h5 file next to this script.")
     sys.exit(1)
 
-print(f"Loading emotion model from: {EMOTION_MODEL}")
+_stderr(f"Loading emotion model from: {EMOTION_MODEL}")
 model = load_model(EMOTION_MODEL)
 
 face_cascade = cv2.CascadeClassifier(
@@ -130,17 +143,19 @@ class GazeDetector:
             FACE_LANDMARKER_PATH,
         )
         if not os.path.exists(model_path):
-            print("Downloading face landmarker model (~30 MB) ...")
+            _stderr("Downloading face landmarker model (~30 MB) ...")
             url = (
                 "https://storage.googleapis.com/mediapipe-models/"
                 "face_landmarker/face_landmarker/float16/1/face_landmarker.task"
             )
             urllib.request.urlretrieve(url, model_path)
-            print("Download complete.")
+            _stderr("Download complete.")
 
         self._mp = mp
         self._mp_vision = mp_vision
-        use_video = os.environ.get("GAZE_VIDEO_MODE", "1") != "0"
+        # Discrete JPEG frames from the web worker are not a continuous video stream.
+        # IMAGE mode is the stable default; enable VIDEO only for local cv2.capture loops.
+        use_video = os.environ.get("GAZE_VIDEO_MODE", "0") == "1"
         running_mode = (
             mp_vision.RunningMode.VIDEO if use_video else mp_vision.RunningMode.IMAGE
         )
@@ -289,14 +304,18 @@ class GazeDetector:
 
     def _detect(self, frame_bgr):
         h_px, w_px = frame_bgr.shape[:2]
-        rgb = cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB)
+        rgb = np.ascontiguousarray(cv2.cvtColor(frame_bgr, cv2.COLOR_BGR2RGB))
         mp_image = self._mp.Image(image_format=self._mp.ImageFormat.SRGB, data=rgb)
 
-        if self._video_mode:
-            self._timestamp_ms += int(os.environ.get("GAZE_FRAME_MS", "33"))
-            result = self._landmarker.detect_for_video(mp_image, self._timestamp_ms)
-        else:
-            result = self._landmarker.detect(mp_image)
+        try:
+            if self._video_mode:
+                self._timestamp_ms += int(os.environ.get("GAZE_FRAME_MS", "33"))
+                result = self._landmarker.detect_for_video(mp_image, self._timestamp_ms)
+            else:
+                result = self._landmarker.detect(mp_image)
+        except Exception as exc:
+            _stderr(f"[GAZE] landmark detection failed: {exc}")
+            return None, w_px, h_px
 
         if not result.face_landmarks:
             return None, w_px, h_px
@@ -434,32 +453,38 @@ class GazeDetector:
 class PhoneDetector:
     PHONE_CLASS = 67
     CONF_THR    = 0.40
-    SKIP        = 6
+    SKIP        = _env_int("PHONE_SKIP", 1)
 
     def __init__(self):
         from ultralytics import YOLO
-        print("Loading YOLOv8n (downloads ~6 MB on first run) ...")
+        _stderr("Loading YOLOv8n (downloads ~6 MB on first run) ...")
         self._model   = YOLO('yolov8n.pt')
         self._frame_n = 0
         self._last    = []
 
     def process(self, frame_bgr):
         self._frame_n += 1
-        if self._frame_n % self.SKIP != 0:
-            return self._last
+        if self.SKIP > 1 and self._frame_n % self.SKIP != 0:
+            return list(self._last)
 
-        # Resize for faster inference
         h, w = frame_bgr.shape[:2]
-        frame_resized = cv2.resize(frame_bgr, (w // 2, h // 2))
-        results = self._model(frame_resized, verbose=False, classes=[self.PHONE_CLASS])[0]
-        boxes   = []
+        scale = 2
+        frame_resized = cv2.resize(frame_bgr, (max(w // scale, 1), max(h // scale, 1)))
+        try:
+            results = self._model(
+                frame_resized, verbose=False, classes=[self.PHONE_CLASS]
+            )[0]
+        except Exception as exc:
+            _stderr(f"[PHONE] YOLO failed: {exc}")
+            return list(self._last)
+
+        boxes = []
         for box in results.boxes:
             conf = float(box.conf[0])
             if conf >= self.CONF_THR:
                 x1, y1, x2, y2 = map(int, box.xyxy[0])
-                # Scale back to original resolution
-                x1, y1, x2, y2 = x1 * 2, y1 * 2, x2 * 2, y2 * 2
-                boxes.append({'x1': x1, 'y1': y1, 'x2': x2, 'y2': y2, 'conf': conf})
+                x1, y1, x2, y2 = x1 * scale, y1 * scale, x2 * scale, y2 * scale
+                boxes.append({"x1": x1, "y1": y1, "x2": x2, "y2": y2, "conf": conf})
         self._last = boxes
         return boxes
 
@@ -484,7 +509,7 @@ class PhoneDetector:
 class PaperDetector:
     DOC_CLASSES  = [73]       # COCO "book" — closest proxy for documents
     CONF_THR     = 0.22
-    SKIP         = 3
+    SKIP         = _env_int("PAPER_SKIP", 1)
 
     # Contour filters — reject full-frame false positives
     MIN_AREA_PIXELS = 5000          # ignore tiny noise
@@ -498,7 +523,7 @@ class PaperDetector:
     def __init__(self, yolo_model=None):
         from ultralytics import YOLO
         if yolo_model is None:
-            print("Loading YOLOv8n for paper detection...")
+            _stderr("Loading YOLOv8n for paper detection...")
             self._model = YOLO('yolov8n.pt')
         else:
             self._model = yolo_model
@@ -640,7 +665,7 @@ class PaperDetector:
         boxes.extend(self._quads_from_mask(white_mask, img_w, img_h, frame_area))
 
         if os.environ.get("LOG_PAPER_DEBUG", "0") == "1":
-            print(f"[PAPER] valid contour candidates: {len(boxes)}", flush=True)
+            _stderr(f"[PAPER] valid contour candidates: {len(boxes)}")
 
         if boxes:
             boxes.sort(
@@ -652,8 +677,8 @@ class PaperDetector:
 
     def process(self, frame_bgr):
         self._frame_n += 1
-        if self._frame_n % self.SKIP != 0:
-            return self._last
+        if self.SKIP > 1 and self._frame_n % self.SKIP != 0:
+            return list(self._last)
 
         yolo_boxes    = self._detect_yolo(frame_bgr)
         contour_boxes = self._detect_contours(frame_bgr)
@@ -786,10 +811,53 @@ def draw_status_bar(frame, gaze, phone_boxes, paper_boxes, emotion_label):
 #  6.  MAIN LOOP
 # ──────────────────────────────────────────────────────────
 
+def run_detections_on_frame(frame_bgr, gaze_det, phone_det, paper_det):
+    """
+    Run phone, paper, gaze, and emotion on one BGR frame copy.
+    Used by the local webcam loop and the HTTP worker (same code path).
+    """
+    frame = frame_bgr.copy()
+    h_img, w_img = frame.shape[:2]
+    alerts = []
+
+    phone_boxes = phone_det.process(frame) or []
+    paper_boxes = paper_det.process(frame) or []
+    gaze_result = gaze_det.process(frame)
+
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    faces = face_cascade.detectMultiScale(
+        gray, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48)
+    )
+    emotion_label = "NO_FACE"
+    face_box = None
+    if len(faces) > 0:
+        x, y, fw, fh = faces[0]
+        face_box = (x, y, fw, fh)
+        emotion_label, prob_n, color = predict_face(gray[y : y + fh, x : x + fw])
+        cv2.rectangle(frame, (x, y), (x + fw, y + fh), color, 2)
+        draw_confidence_bar(frame, prob_n, x, y, fw)
+
+    draw_phone_boxes(frame, phone_boxes)
+    draw_paper_boxes(frame, paper_boxes)
+    draw_gaze_eye_icon(frame, gaze_result)
+    draw_status_bar(frame, gaze_result, phone_boxes, paper_boxes, emotion_label)
+
+    return {
+        "frame": frame,
+        "phone_boxes": phone_boxes,
+        "paper_boxes": paper_boxes,
+        "gaze_result": gaze_result,
+        "emotion_label": emotion_label,
+        "face_box": face_box,
+        "alerts": alerts,
+        "size": (w_img, h_img),
+    }
+
+
 def main():
-    gaze_det  = GazeDetector()
+    gaze_det = GazeDetector()
     phone_det = PhoneDetector()
-    paper_det = PaperDetector(phone_det._model)  # Share YOLO model for efficiency
+    paper_det = PaperDetector(phone_det._model)
 
     cap = cv2.VideoCapture(0)
     if not cap.isOpened():
@@ -797,89 +865,48 @@ def main():
 
     gaze_det.calibrate(cap, display=True)
 
-    last_gaze    = {'direction': 'center', 'h_ratio': None, 'v_ratio': None, 'alert': False}
-    last_phones  = []
-    last_papers  = []
-    last_emotion = 'NEUTRAL'
-    
-    # FPS monitoring
     frame_count = 0
     fps_timer = time.time()
-    current_fps = 0
+    current_fps = 0.0
 
-    print("Interview monitor running — Q to quit, C to re-calibrate")
+    _stderr("Interview monitor running — Q to quit, C to re-calibrate")
 
-    while True:
-        ret, frame = cap.read()
-        if not ret:
-            break
-        
-        # FPS monitoring
-        frame_count += 1
-        elapsed = time.time() - fps_timer
-        if elapsed >= 1.0:
-            current_fps = frame_count / elapsed
-            frame_count = 0
-            fps_timer = time.time()
+    try:
+        while True:
+            ret, frame = cap.read()
+            if not ret or frame is None:
+                continue
+            frame = frame.copy()
 
-        gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+            frame_count += 1
+            elapsed = time.time() - fps_timer
+            if elapsed >= 1.0:
+                current_fps = frame_count / elapsed
+                frame_count = 0
+                fps_timer = time.time()
 
-        # (a) Emotion — your original code
-        faces = face_cascade.detectMultiScale(
-            gray, scaleFactor=1.1, minNeighbors=5, minSize=(48, 48)
-        )
-        for (x, y, w, h) in faces:
-            face_roi = gray[y:y+h, x:x+w]
-            label, conf, color = predict_face(face_roi)
-            last_emotion = label
+            out = run_detections_on_frame(frame, gaze_det, phone_det, paper_det)
+            display = out["frame"]
+            cv2.putText(
+                display,
+                f"FPS: {current_fps:.1f}",
+                (display.shape[1] - 150, 25),
+                FONT,
+                0.6,
+                (0, 255, 0),
+                2,
+            )
+            cv2.imshow("Interview Monitor — Q quit | C calibrate", display)
 
-            cv2.rectangle(frame, (x, y), (x+w, y+h), color, 3)
-            label_text = f"{label}  {conf*100:.1f}%"
-            (tw, th), _ = cv2.getTextSize(label_text, FONT, 0.8, 2)
-            lbl_y = y + h + 32 if y + h + 38 < frame.shape[0] else y - 12
-            cv2.rectangle(frame, (x, lbl_y-th-9), (x+tw+12, lbl_y+6), color, -1)
-            cv2.putText(frame, label_text, (x+6, lbl_y), FONT, 0.8, (255, 255, 255), 2)
-
-            prob_n = model.predict(
-                (cv2.resize(face_roi, (48, 48)).astype('float32') / 255.0).reshape(1, 48, 48, 1),
-                verbose=0
-            )[0][0]
-            draw_confidence_bar(frame, prob_n, x, y, w)
-
-        # (b) Gaze
-        last_gaze = gaze_det.process(frame)
-
-        # (c) Phone
-        last_phones = phone_det.process(frame)
-        draw_phone_boxes(frame, last_phones)
-
-        # (d) Paper
-        last_papers = paper_det.process(frame)
-        draw_paper_boxes(frame, last_papers)
-
-        # (e) Your original legend
-        fh = frame.shape[0]
-        cv2.putText(frame, "[GREEN] NEUTRAL",  (10, fh - 40), FONT, 0.55, COLOR_NEUTRAL,   2)
-        cv2.putText(frame, "[RED] IRRITATED",  (10, fh - 18), FONT, 0.55, COLOR_IRRITATED, 2)
-
-        # (f) New overlays
-        draw_status_bar(frame, last_gaze, last_phones, last_papers, last_emotion)
-        draw_gaze_eye_icon(frame, last_gaze)
-        
-        # Display FPS
-        cv2.putText(frame, f"FPS: {current_fps:.1f}", (frame.shape[1] - 150, 25), FONT, 0.6, (0, 255, 0), 2)
-
-        cv2.imshow('Interview Monitor — Q quit | C calibrate', frame)
-
-        key = cv2.waitKey(1) & 0xFF
-        if key == ord('q'):
-            break
-        elif key == ord('c'):
-            gaze_det.calibrate(cap, display=True)
-
-    cap.release()
-    cv2.destroyAllWindows()
-    print("Interview monitor stopped.")
+            key = cv2.waitKey(1) & 0xFF
+            if key == ord("q"):
+                break
+            if key == ord("c"):
+                gaze_det.calibrate(cap, display=True)
+    finally:
+        cap.release()
+        cv2.destroyAllWindows()
+        _stderr("Interview monitor stopped.")
 
 
 if __name__ == '__main__':

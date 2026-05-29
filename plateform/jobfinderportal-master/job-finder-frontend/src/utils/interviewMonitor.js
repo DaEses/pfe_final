@@ -193,13 +193,18 @@ export function startParallelEmotionUpload({
           body: { imageBase64 },
         },
       );
-      if (ok && data) {
+      if (!ok || data?.error) {
+        console.warn('[monitor] frame analysis failed:', data?.error || 'unknown');
+      } else if (data) {
         lastDetection = data.detection || lastDetection;
         drawDetectionOverlay(canvasEl, videoEl, lastDetection);
-        onStatus?.(data);
+        onStatus?.({
+          ...data,
+          ...(data.detection || {}),
+        });
       }
-    } catch {
-      // On error keep showing the last known detection
+    } catch (err) {
+      console.warn('[monitor] frame upload error:', err?.message || err);
       drawDetectionOverlay(canvasEl, videoEl, lastDetection);
     } finally {
       busy = false;
